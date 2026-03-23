@@ -2,7 +2,7 @@ import diffrax
 import jax.numpy as jnp
 import pytest
 
-from roughrax._wrapper import WrappedRoughRK
+from roughrax._wrapper import RoughRK
 
 
 def test_wrapped_rough_rk_matches_base_solver_on_ode_step():
@@ -12,7 +12,7 @@ def test_wrapped_rough_rk_matches_base_solver_on_ode_step():
     t1 = 0.1
 
     base_solver = diffrax.Tsit5()
-    wrapped_solver = WrappedRoughRK(base_solver)
+    wrapped_solver = RoughRK(base_solver)
 
     base_state = base_solver.init(term, t0, t1, y0, None)
     wrapped_state = wrapped_solver.init(term, t0, t1, y0, None)
@@ -34,7 +34,7 @@ def test_wrapped_rough_rk_matches_base_solver_on_ode_step():
 
 def test_wrapped_rough_rk_runs_in_diffeqsolve():
     term = diffrax.ODETerm(lambda t, y, args: -y)
-    solver = WrappedRoughRK(diffrax.Tsit5())
+    solver = RoughRK(diffrax.Tsit5())
 
     solution = diffrax.diffeqsolve(
         term,
@@ -52,4 +52,4 @@ def test_wrapped_rough_rk_runs_in_diffeqsolve():
 
 def test_wrapped_rough_rk_rejects_non_erk_solver():
     with pytest.raises(TypeError, match="explicit diffrax RK solver"):
-        WrappedRoughRK(object())
+        RoughRK(object())

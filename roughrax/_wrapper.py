@@ -25,7 +25,7 @@ def _tree_weighted_sum(weights: tuple[float, ...], trees: tuple[Y, ...], like: Y
     return total
 
 
-class WrappedRoughRK(diffrax.AbstractSolver[None]):
+class RoughRK(diffrax.AbstractSolver[None]):
     solver: diffrax.AbstractERK = eqx.field(static=True)
 
     interpolation_cls = diffrax.LocalLinearInterpolation
@@ -79,7 +79,9 @@ class WrappedRoughRK(diffrax.AbstractSolver[None]):
         tableau = self.tableau
         control = terms.contr(t0, t1)
 
-        stage_times = (t0 + tableau.c1 * dt,) + tuple(t0 + c_i * dt for c_i in tableau.c)
+        stage_times = (t0 + tableau.c1 * dt,) + tuple(
+            t0 + c_i * dt for c_i in tableau.c
+        )
         stage_increments = []
 
         for i, stage_time in enumerate(stage_times):

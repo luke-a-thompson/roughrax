@@ -23,7 +23,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from fbm import FBM
 
-from roughrax._wrapper import WrappedRoughRK
+from roughrax import RoughRK
 from ees import EES25, EES27
 
 matplotlib.use("Agg")
@@ -42,7 +42,9 @@ def get_2d_fbm(n: int, hurst: float, length: float) -> np.ndarray:
     return np.stack([x1, x2], axis=-1)
 
 
-def method_run(base_solver: diffrax.AbstractERK, x: np.ndarray, y0: float = 1.0) -> np.ndarray:
+def method_run(
+    base_solver: diffrax.AbstractERK, x: np.ndarray, y0: float = 1.0
+) -> np.ndarray:
     ts = np.linspace(0.0, 1.0, len(x), dtype=np.float64)
     x = np.asarray(x, dtype=np.float64)
     term = diffrax.ControlTerm(
@@ -54,7 +56,7 @@ def method_run(base_solver: diffrax.AbstractERK, x: np.ndarray, y0: float = 1.0)
     )
     solution = diffrax.diffeqsolve(
         term,
-        WrappedRoughRK(base_solver),
+        RoughRK(base_solver),
         t0=float(ts[0]),
         t1=float(ts[-1]),
         dt0=float(ts[1] - ts[0]),
