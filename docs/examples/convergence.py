@@ -1,4 +1,4 @@
-"""Convergence experiment mirroring the original rough EES script."""
+"""Log-ODE and SO(3) RDE convergence against fine Wong-Zakai references."""
 
 from __future__ import annotations
 
@@ -18,186 +18,399 @@ import diffrax
 import jax
 import jax.numpy as jnp
 import matplotlib
-import matplotlib.markers as mkr
-import matplotlib.pyplot as plt
 import numpy as np
-from fbm import FBM
+from georax import CFEES25, Euclidean, GeometricTerm, RKMK, SO
 
-from roughrax import RoughRK
-from ees import EES25, EES27
+from roughrax import LogODE, RoughTerm
 
 matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
 jax.config.update("jax_enable_x64", True)
 
 
-def vector_field(t, y, args):
+def diffrax_vector_field(t, y, args):
     del t, args
-    return jnp.stack([jnp.cos(y), jnp.sin(y)], axis=-1)
+    return jnp.stack([jnp.cos(y), jnp.sin(y)])
 
 
-def get_2d_fbm(n: int, hurst: float, length: float) -> np.ndarray:
-    fbm = FBM(n=n, hurst=hurst, length=length, method="daviesharte")
-    x1 = fbm.fbm()
-    x2 = fbm.fbm()
-    return np.stack([x1, x2], axis=-1)
+def rough_vector_field(y):
+    return jnp.stack([jnp.cos(y), jnp.sin(y)])
 
 
-def method_run(
-    base_solver: diffrax.AbstractERK, x: np.ndarray, y0: float = 1.0
-) -> np.ndarray:
-    ts = np.linspace(0.0, 1.0, len(x), dtype=np.float64)
-    x = np.asarray(x, dtype=np.float64)
-    term = diffrax.ControlTerm(
-        vector_field=vector_field,
-        control=diffrax.LinearInterpolation(
-            ts=jnp.asarray(ts, dtype=jnp.float64),
-            ys=jnp.asarray(x, dtype=jnp.float64),
-        ),
+def so3_vector_field(y):
+    return jnp.eye(3, dtype=y.dtype)
+
+
+def brownian_samples(
+    *, exponent: int, seed: int, t1: float, dim: int
+) -> tuple[np.ndarray, np.ndarray]:
+    n = 2**exponent
+    ts = jnp.linspace(0.0, t1, n + 1)
+    brownian = diffrax.VirtualBrownianTree(
+        t0=0.0,
+        t1=t1,
+        tol=t1 / (4 * n),
+        shape=(dim,),
+        key=jax.random.PRNGKey(seed),
     )
-    solution = diffrax.diffeqsolve(
+    ys = jax.vmap(lambda t: brownian.evaluate(t))(ts)
+    return np.asarray(ts), np.asarray(ys)
+
+
+def solve_fine_wong_zakai(ts: np.ndarray, xs: np.ndarray, y0: float) -> np.ndarray:
+    ts_jax = jnp.asarray(ts)
+    term = diffrax.ControlTerm(
+        diffrax_vector_field,
+        diffrax.LinearInterpolation(ts=ts_jax, ys=jnp.asarray(xs)),
+    )
+    sol = diffrax.diffeqsolve(
         term,
-        RoughRK(base_solver),
+        diffrax.Dopri5(),
         t0=float(ts[0]),
         t1=float(ts[-1]),
-        dt0=float(ts[1] - ts[0]),
-        y0=jnp.asarray(y0, dtype=jnp.float64),
-        saveat=diffrax.SaveAt(ts=jnp.asarray(ts, dtype=jnp.float64)),
-        stepsize_controller=diffrax.ConstantStepSize(),
+        dt0=None,
+        y0=jnp.asarray(y0),
+        stepsize_controller=diffrax.StepTo(ts_jax),
+        saveat=diffrax.SaveAt(ts=ts_jax),
         max_steps=len(ts) + 4,
     )
-    return np.asarray(solution.ys).flatten()
+    return np.asarray(sol.ys)
 
 
-def get_error(y_exact: np.ndarray, y_vals: np.ndarray, length: float) -> float:
-    t = np.linspace(0.0, length, len(y_vals), dtype=np.float64)
-    t_exact = np.linspace(0.0, length, len(y_exact), dtype=np.float64)
-    true_vals = np.interp(t, t_exact, y_exact)
-    return float(np.max(np.abs(true_vals - y_vals)))
+def solve_so3_fine_wong_zakai(ts: np.ndarray, xs: np.ndarray) -> np.ndarray:
+    ts_jax = jnp.asarray(ts)
+    xs_jax = jnp.asarray(xs)
+    velocities = (xs_jax[1:] - xs_jax[:-1]) / (ts_jax[1:] - ts_jax[:-1])[:, None]
+
+    def coeffs(t, y, args):
+        del y, args
+        index = jnp.searchsorted(ts_jax, t, side="right") - 1
+        index = jnp.clip(index, 0, velocities.shape[0] - 1)
+        return velocities[index]
+
+    sol = diffrax.diffeqsolve(
+        GeometricTerm(coeffs, SO(3)),
+        CFEES25(),
+        t0=float(ts[0]),
+        t1=float(ts[-1]),
+        dt0=None,
+        y0=jnp.eye(3),
+        stepsize_controller=diffrax.StepTo(ts_jax),
+        saveat=diffrax.SaveAt(ts=ts_jax),
+        max_steps=len(ts) + 4,
+    )
+    return np.asarray(sol.ys)
 
 
-def plot(
-    base_solver: diffrax.AbstractERK,
-    name: str,
-    hurst: float,
-    length: float,
-    rate,
-    ax,
+def solve_log_ode(
+    ts: np.ndarray,
+    xs: np.ndarray,
     *,
-    num_paths: int = 10,
-    backward: bool = False,
+    depth: int,
+    coarse_exponent: int,
+    fine_exponent: int,
+    y0: float,
+    solution: str,
+) -> np.ndarray:
+    coarse_ts = jnp.asarray(ts[:: 2 ** (fine_exponent - coarse_exponent)])
+    driver = diffrax.LinearInterpolation(ts=jnp.asarray(ts), ys=jnp.asarray(xs))
+    term = RoughTerm(
+        rough_vector_field,
+        driver,
+        Euclidean(),
+        depth=depth,
+        interval_ts=coarse_ts,
+        solution=solution,
+    )
+
+    sol = diffrax.diffeqsolve(
+        term,
+        LogODE(RKMK(diffrax.Tsit5())),
+        t0=float(coarse_ts[0]),
+        t1=float(coarse_ts[-1]),
+        dt0=None,
+        y0=jnp.asarray(y0),
+        stepsize_controller=diffrax.StepTo(coarse_ts),
+        saveat=diffrax.SaveAt(ts=coarse_ts),
+        max_steps=len(coarse_ts) + 4,
+    )
+    return np.asarray(sol.ys)
+
+
+def solve_so3_rde(
+    ts: np.ndarray,
+    xs: np.ndarray,
+    *,
+    depth: int,
+    coarse_exponent: int,
+    fine_exponent: int,
+    solution: str,
+) -> np.ndarray:
+    coarse_ts = jnp.asarray(ts[:: 2 ** (fine_exponent - coarse_exponent)])
+    driver = diffrax.LinearInterpolation(ts=jnp.asarray(ts), ys=jnp.asarray(xs))
+    term = RoughTerm(
+        so3_vector_field,
+        driver,
+        SO(3),
+        depth=depth,
+        interval_ts=coarse_ts,
+        solution=solution,
+    )
+
+    sol = diffrax.diffeqsolve(
+        term,
+        LogODE(CFEES25()),
+        t0=float(coarse_ts[0]),
+        t1=float(coarse_ts[-1]),
+        dt0=None,
+        y0=jnp.eye(3),
+        stepsize_controller=diffrax.StepTo(coarse_ts),
+        saveat=diffrax.SaveAt(ts=coarse_ts),
+        max_steps=len(coarse_ts) + 4,
+    )
+    return np.asarray(sol.ys)
+
+
+def expected_line(h: np.ndarray, errors: np.ndarray, rate: float) -> np.ndarray:
+    offset = np.mean(np.log(errors) - rate * np.log(h))
+    return np.exp(offset) * h**rate
+
+
+def plot_convergence(
+    h: np.ndarray,
+    rows: list[tuple[str, str, dict[int, np.ndarray]]],
+    *,
+    output: Path,
 ) -> None:
-    n = int(length * 2**16)
-    h = [2 ** (-i) for i in range(4, 14)]
-    y = np.zeros(len(h), dtype=np.float64)
+    fig, axes = plt.subplots(len(rows), 3, figsize=(11, 3.4 * len(rows)), sharex=True)
+    axes = np.asarray(axes)
+    if axes.ndim == 1:
+        axes = axes[None, :]
 
-    for _ in range(num_paths):
-        x = get_2d_fbm(n, hurst=hurst, length=length)
-        y_exact = method_run(base_solver, x)
-
-        error = []
-        for h_ in h:
-            step = int(n * h_)
-            x_coarse = x[::step]
-            y_vals = method_run(base_solver, x_coarse)
-            if not backward:
-                error.append(get_error(y_exact, y_vals, length))
-            else:
-                y_vals = method_run(base_solver, x_coarse[::-1], y0=float(y_vals[-1]))
-                error.append(abs(float(y_exact[0]) - float(y_vals[-1])))
-
-        y += np.log10(np.maximum(error, np.finfo(np.float64).tiny))
-
-    y /= num_paths
-    x = np.log10(np.asarray(h, dtype=np.float64))
-    dx = np.array([x[0], x[-1]], dtype=np.float64)
-
-    err_label = (
-        r"$\log_{10}(\mathcal{E}(h))$"
-        if not backward
-        else r"$\log_{10}(\overleftarrow{\mathcal{E}}(h))$"
-    )
-    slope = rate(hurst)
-    intercept = float(np.mean(y) - slope * np.mean(x))
-    print(
-        f"{name} H={hurst:.1f} {'backward' if backward else 'forward'} intercept: {intercept:.6f}"
-    )
-
-    ax.scatter(
-        x,
-        y,
-        marker=mkr.MarkerStyle("x", fillstyle="none"),
-        color="crimson",
-    )
-    ax.plot(dx, slope * dx + intercept, color="mediumblue")
-    ax.legend([err_label, f"{np.round(slope, 1)}$x + c$"])
-    ax.set_xlabel(r"$\log_{10}(h)$")
-    ax.set_ylabel(err_label)
-
-
-def plot_grid(hurst: float, *, length: float, num_paths: int, output_dir: Path) -> Path:
-    _, ax = plt.subplots(2, 2, figsize=(10 * (2 / 3), 10 * (2 / 3)))
-    methods = [("EES(2,5)", EES25()), ("EES(2,7)", EES27())]
-    titles = [
-        r"$\mathcal{E}(h)$ for $\mathrm{EES}_\mathcal{R}(2,5)$",
-        r"$\overleftarrow{\mathcal{E}}(h)$ for $\mathrm{EES}_\mathcal{R}(2,5)$",
-        r"$\mathcal{E}(h)$ for $\mathrm{EES}_\mathcal{R}(2,7)$",
-        r"$\overleftarrow{\mathcal{E}}(h)$ for $\mathrm{EES}_\mathcal{R}(2,7)$",
-    ]
-    rates = [
-        lambda x: 2 * x - 0.5,
-        lambda x: 6 * x - 1.0,
-        lambda x: 2 * x - 0.5,
-        lambda x: 8 * x - 1.0,
-    ]
-
-    for i, (name, solver) in enumerate(methods):
-        for j in range(2):
-            plot(
-                solver,
-                name,
-                hurst,
-                length,
-                rates[i * 2 + j],
-                ax[i][j],
-                num_paths=num_paths,
-                backward=bool(j),
+    for row_axes, (title_prefix, ylabel, mean_errors_by_depth) in zip(
+        axes, rows, strict=True
+    ):
+        for ax, depth in zip(row_axes, (1, 2, 3), strict=True):
+            errors = mean_errors_by_depth[depth]
+            rate = 0.5 * depth
+            ax.loglog(h, errors, "x", color="red", markersize=7, label="sampled")
+            ax.loglog(
+                h,
+                expected_line(h, errors, rate),
+                color="black",
+                linestyle="--",
+                label=rf"$h^{{{rate:g}}}$",
             )
-            ax[i][j].set_title(titles[i * 2 + j])
-
-    plt.tight_layout()
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / f"rde_example_ees{int(hurst * 100)}.png"
-    plt.savefig(output_path, dpi=200)
-    plt.close()
-    return output_path
+            ax.set_title(f"{title_prefix} order {depth}")
+            ax.set_xlabel("step size")
+            ax.grid(True, which="both", alpha=0.25)
+            ax.legend()
+        row_axes[0].set_ylabel(ylabel)
+    fig.tight_layout()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output, dpi=200)
+    plt.close(fig)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--hurst", type=float, nargs="+", default=[0.4, 0.5, 0.6])
-    parser.add_argument("--length", type=float, default=1.0)
-    parser.add_argument("--num-paths", type=int, default=10)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--t1", type=float, default=1.0)
+    parser.add_argument("--y0", type=float, default=1.0)
+    parser.add_argument("--num-paths", type=int, default=8)
+    parser.add_argument("--fine-exponent", type=int, default=14)
     parser.add_argument(
-        "--output-dir",
+        "--coarse-exponents",
+        type=int,
+        nargs="+",
+        default=list(range(4, 11)),
+    )
+    parser.add_argument(
+        "--output",
         type=Path,
-        default=Path(__file__).resolve().parent / "outputs",
+        default=Path(__file__).resolve().parent / "outputs" / "log_ode_convergence.png",
     )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    np.random.seed(args.seed)
+    if args.num_paths < 1:
+        raise ValueError("--num-paths must be at least 1.")
+    if any(k >= args.fine_exponent for k in args.coarse_exponents):
+        raise ValueError("Every coarse exponent must be smaller than --fine-exponent.")
 
-    for hurst in args.hurst:
-        output_path = plot_grid(
-            hurst,
-            length=args.length,
-            num_paths=args.num_paths,
-            output_dir=args.output_dir,
+    h = np.asarray([args.t1 / 2**k for k in args.coarse_exponents], dtype=np.float64)
+    stratonovich_errors_by_depth = {
+        depth: np.zeros(len(args.coarse_exponents), dtype=np.float64)
+        for depth in (1, 2, 3)
+    }
+    ito_errors_by_depth = {
+        depth: np.zeros(len(args.coarse_exponents), dtype=np.float64)
+        for depth in (1, 2, 3)
+    }
+    for path_index in range(args.num_paths):
+        path_seed = args.seed + path_index
+        print(
+            f"sampling Brownian path {path_index + 1}/{args.num_paths} "
+            f"on {2**args.fine_exponent} fine steps"
         )
-        print(f"H={hurst:.1f} plot: {output_path}")
+        ts, xs = brownian_samples(
+            exponent=args.fine_exponent,
+            seed=path_seed,
+            t1=args.t1,
+            dim=2,
+        )
+
+        print(f"solving fine Wong-Zakai reference for path {path_index + 1}")
+        y_ref = solve_fine_wong_zakai(ts, xs, args.y0)
+        print(f"path {path_index + 1} reference y({args.t1}) = {y_ref[-1]:.8e}")
+
+        for depth in (1, 2, 3):
+            for i, k in enumerate(args.coarse_exponents):
+                print(
+                    f"solving Log-ODE Stratonovich order {depth} on {2**k} steps "
+                    f"for path {path_index + 1}"
+                )
+                y = solve_log_ode(
+                    ts,
+                    xs,
+                    depth=depth,
+                    coarse_exponent=k,
+                    fine_exponent=args.fine_exponent,
+                    y0=args.y0,
+                    solution="stratonovich",
+                )
+                step = 2 ** (args.fine_exponent - k)
+                stratonovich_errors_by_depth[depth][i] += float(
+                    np.max(np.abs(y - y_ref[::step]))
+                )
+
+                print(
+                    f"solving Log-ODE branched Ito order {depth} on {2**k} steps "
+                    f"for path {path_index + 1}"
+                )
+                y = solve_log_ode(
+                    ts,
+                    xs,
+                    depth=depth,
+                    coarse_exponent=k,
+                    fine_exponent=args.fine_exponent,
+                    y0=args.y0,
+                    solution="ito",
+                )
+                ito_errors_by_depth[depth][i] += float(
+                    np.max(np.abs(y - y_ref[::step]))
+                )
+
+    mean_stratonovich_errors_by_depth = {
+        depth: np.maximum(errors / args.num_paths, np.finfo(np.float64).tiny)
+        for depth, errors in stratonovich_errors_by_depth.items()
+    }
+    mean_ito_errors_by_depth = {
+        depth: np.maximum(errors / args.num_paths, np.finfo(np.float64).tiny)
+        for depth, errors in ito_errors_by_depth.items()
+    }
+
+    so3_stratonovich_errors_by_depth = {
+        depth: np.zeros(len(args.coarse_exponents), dtype=np.float64)
+        for depth in (1, 2, 3)
+    }
+    so3_ito_errors_by_depth = {
+        depth: np.zeros(len(args.coarse_exponents), dtype=np.float64)
+        for depth in (1, 2, 3)
+    }
+    for path_index in range(args.num_paths):
+        path_seed = args.seed + path_index
+        print(
+            f"sampling SO(3) Brownian path {path_index + 1}/{args.num_paths} "
+            f"on {2**args.fine_exponent} fine steps"
+        )
+        ts, xs = brownian_samples(
+            exponent=args.fine_exponent,
+            seed=path_seed,
+            t1=args.t1,
+            dim=3,
+        )
+
+        print(f"solving fine SO(3) Wong-Zakai reference for path {path_index + 1}")
+        y_ref = solve_so3_fine_wong_zakai(ts, xs)
+        print(
+            f"path {path_index + 1} reference det(y({args.t1})) = "
+            f"{np.linalg.det(y_ref[-1]):.8e}"
+        )
+
+        for depth in (1, 2, 3):
+            for i, k in enumerate(args.coarse_exponents):
+                print(
+                    f"solving SO(3) RDE Stratonovich order {depth} on {2**k} steps "
+                    f"for path {path_index + 1}"
+                )
+                y = solve_so3_rde(
+                    ts,
+                    xs,
+                    depth=depth,
+                    coarse_exponent=k,
+                    fine_exponent=args.fine_exponent,
+                    solution="stratonovich",
+                )
+                step = 2 ** (args.fine_exponent - k)
+                path_error = np.linalg.norm(y - y_ref[::step], axis=(-2, -1))
+                so3_stratonovich_errors_by_depth[depth][i] += float(
+                    np.max(path_error)
+                )
+
+                print(
+                    f"solving SO(3) RDE planar branched Ito order {depth} "
+                    f"on {2**k} steps for path {path_index + 1}"
+                )
+                y = solve_so3_rde(
+                    ts,
+                    xs,
+                    depth=depth,
+                    coarse_exponent=k,
+                    fine_exponent=args.fine_exponent,
+                    solution="ito",
+                )
+                path_error = np.linalg.norm(y - y_ref[::step], axis=(-2, -1))
+                so3_ito_errors_by_depth[depth][i] += float(np.max(path_error))
+
+    mean_so3_stratonovich_errors_by_depth = {
+        depth: np.maximum(errors / args.num_paths, np.finfo(np.float64).tiny)
+        for depth, errors in so3_stratonovich_errors_by_depth.items()
+    }
+    mean_so3_ito_errors_by_depth = {
+        depth: np.maximum(errors / args.num_paths, np.finfo(np.float64).tiny)
+        for depth, errors in so3_ito_errors_by_depth.items()
+    }
+    plot_convergence(
+        h,
+        [
+            (
+                "Log-ODE Stratonovich",
+                "max absolute path error",
+                mean_stratonovich_errors_by_depth,
+            ),
+            (
+                "Log-ODE branched Ito",
+                "max absolute path error",
+                mean_ito_errors_by_depth,
+            ),
+            (
+                "SO(3) RDE Stratonovich",
+                "max Frobenius path error",
+                mean_so3_stratonovich_errors_by_depth,
+            ),
+            (
+                "SO(3) RDE planar branched Ito",
+                "max Frobenius path error",
+                mean_so3_ito_errors_by_depth,
+            ),
+        ],
+        output=args.output,
+    )
+    print(f"saved {args.output}")
 
 
 if __name__ == "__main__":

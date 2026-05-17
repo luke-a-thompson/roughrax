@@ -7,20 +7,26 @@ name = "roughrax"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.12"
 dependencies = [
-    "jax>=0.9.1",
     "diffrax>=0.7.1",
+    "jax[cuda]>=0.9.1",
+    "pysiglib[cuda]>=3.0.1",
+    "kauri",
+    "georax",
 ]
 
 [tool.uv.sources]
 diffrax-lowstorage = {git = "https://github.com/luke-a-thompson/diffrax-lowstorage.git"}
+georax = {git = "https://github.com/luke-a-thompson/georax.git"}
 
 [project.optional-dependencies]
 dev = [
     "pytest",
     "fbm>=0.3.0",
+    "diffrax-lowstorage",
     "matplotlib>=3.10.8",
+    "tqdm"
 ]
 
 [tool.uv.build-backend]
