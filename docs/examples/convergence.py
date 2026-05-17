@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import os
 import sys
 from pathlib import Path
@@ -27,6 +28,13 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 jax.config.update("jax_enable_x64", True)
+
+
+def to_numpy_and_clear_cache(x) -> np.ndarray:
+    out = np.asarray(jax.block_until_ready(x))
+    jax.clear_caches()
+    gc.collect()
+    return out
 
 
 def diffrax_vector_field(t, y, args):
@@ -75,7 +83,7 @@ def solve_fine_wong_zakai(ts: np.ndarray, xs: np.ndarray, y0: float) -> np.ndarr
         saveat=diffrax.SaveAt(ts=ts_jax),
         max_steps=len(ts) + 4,
     )
-    return np.asarray(sol.ys)
+    return to_numpy_and_clear_cache(sol.ys)
 
 
 def solve_so3_fine_wong_zakai(ts: np.ndarray, xs: np.ndarray) -> np.ndarray:
@@ -100,7 +108,7 @@ def solve_so3_fine_wong_zakai(ts: np.ndarray, xs: np.ndarray) -> np.ndarray:
         saveat=diffrax.SaveAt(ts=ts_jax),
         max_steps=len(ts) + 4,
     )
-    return np.asarray(sol.ys)
+    return to_numpy_and_clear_cache(sol.ys)
 
 
 def solve_log_ode(
@@ -126,7 +134,7 @@ def solve_log_ode(
 
     sol = diffrax.diffeqsolve(
         term,
-        LogODE(RKMK(diffrax.Tsit5())),
+        LogODE(diffrax.Tsit5()),
         t0=float(coarse_ts[0]),
         t1=float(coarse_ts[-1]),
         dt0=None,
@@ -135,7 +143,7 @@ def solve_log_ode(
         saveat=diffrax.SaveAt(ts=coarse_ts),
         max_steps=len(coarse_ts) + 4,
     )
-    return np.asarray(sol.ys)
+    return to_numpy_and_clear_cache(sol.ys)
 
 
 def solve_so3_rde(
@@ -169,7 +177,7 @@ def solve_so3_rde(
         saveat=diffrax.SaveAt(ts=coarse_ts),
         max_steps=len(coarse_ts) + 4,
     )
-    return np.asarray(sol.ys)
+    return to_numpy_and_clear_cache(sol.ys)
 
 
 def expected_line(h: np.ndarray, errors: np.ndarray, rate: float) -> np.ndarray:
@@ -357,9 +365,7 @@ def main() -> None:
                 )
                 step = 2 ** (args.fine_exponent - k)
                 path_error = np.linalg.norm(y - y_ref[::step], axis=(-2, -1))
-                so3_stratonovich_errors_by_depth[depth][i] += float(
-                    np.max(path_error)
-                )
+                so3_stratonovich_errors_by_depth[depth][i] += float(np.max(path_error))
 
                 print(
                     f"solving SO(3) RDE planar branched Ito order {depth} "

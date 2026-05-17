@@ -4,11 +4,12 @@ Rough Differential Equation integrators for [Diffrax](https://github.com/patrick
 
 ## LogODE
 
-`LogODE` solves a rough differential equation by lifting log-signatures of the driving path into a frozen vector field and integrating that field with a wrapped Diffrax solver. Like `georax.RKMK`, you pick accuracy/adaptivity by choosing the base solver — `LogODE` reuses its Runge-Kutta coefficients.
+`LogODE` solves a rough differential equation by lifting log-signatures of the driving path into a frozen vector field and integrating that field with a wrapped Diffrax solver. You pick accuracy/adaptivity by choosing the base solver — `LogODE` reuses its Runge-Kutta coefficients.
 
 - Wrap a fixed-step ERK (for example `Heun()`) for fixed-step rough integration.
 - Wrap an adaptive ERK (for example `Dopri5()`) to keep automatic stepsizing.
-- The default base solver is `RKMK(Tsit5())`.
+- Pass the base solver explicitly, for example `LogODE(diffrax.Tsit5())`.
+- Wrap a geometric solver such as `georax.RKMK(diffrax.Tsit5())` when solving on a manifold.
 
 ## RoughTerm
 
@@ -21,7 +22,7 @@ Rough Differential Equation integrators for [Diffrax](https://github.com/patrick
 | `geometry` | `georax.Manifold` the solution lives on (defaults to `Euclidean`). |
 | `depth` | Truncation depth of the log-signature. |
 | `interval_ts` | Coarse grid the solver steps on. One log-signature per consecutive pair. Defaults to `control.ts`. |
-| `solution` | `"stratonovich"` (log-signature, Lyndon basis) or `"ito"` (branched signature, Kauri basis). |
+| `solution` | `"stratonovich"` (log-signature, Lyndon basis) or `"ito"` (branched signature, rooted-tree basis). |
 
 ## Understanding Rough Path Integration
 1. Sample a (rough) driving path on a fine grid: $X_t \in \mathbb{R}^d$
@@ -57,10 +58,10 @@ term = RoughTerm(
     solution="stratonovich",
 )
 
-# Then solve with a Log-ODE step driving any georax solver under the hood.
+# Then solve with a Log-ODE step driving the wrapped Diffrax solver.
 sol = diffrax.diffeqsolve(
     term,
-    LogODE(),
+    LogODE(diffrax.Tsit5()),
     t0=float(coarse_ts[0]),
     t1=float(coarse_ts[-1]),
     dt0=None,

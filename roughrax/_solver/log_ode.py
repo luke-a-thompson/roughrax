@@ -4,9 +4,9 @@ import equinox as eqx
 from diffrax import (
     AbstractSolver,
     LocalLinearInterpolation,
-    Tsit5,
+    ODETerm,
 )
-from georax import GeometricTerm, RKMK
+from georax import Euclidean, GeometricTerm
 
 from roughrax._term import RoughTerm, unwrap_rough_term
 
@@ -19,15 +19,7 @@ class LogODE(AbstractSolver[None]):
 
     solver: AbstractSolver = eqx.field(static=True)
 
-    def __init__(self, solver: AbstractSolver | None = None):
-        if solver is None:
-            solver = RKMK(Tsit5())
-        if getattr(solver, "term_structure", None) is RoughTerm:
-            raise TypeError(
-                "LogODE wraps a deterministic GeometricTerm solver. Use "
-                "LogODE(georax.RKMK(diffrax.Tsit5())), not a solver that already "
-                "wraps LogODE/RoughTerm."
-            )
+    def __init__(self, solver: AbstractSolver):
         object.__setattr__(self, "solver", solver)
 
     def init(self, terms, t0, t1, y0, args) -> None:
@@ -44,7 +36,11 @@ class LogODE(AbstractSolver[None]):
             del s
             return terms.vf_prod(t0, y, args, coeffs)
 
-        inner_term = GeometricTerm(frozen_vector_field, rough_term.geometry)
+        inner_term = (
+            ODETerm(frozen_vector_field)
+            if isinstance(rough_term.geometry, Euclidean)
+            else GeometricTerm(frozen_vector_field, rough_term.geometry)
+        )
         inner_state = self.solver.init(inner_term, 0.0, 1.0, y0, args)
         y1, y_error, _, _, result = self.solver.step(
             inner_term,

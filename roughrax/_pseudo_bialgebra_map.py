@@ -42,9 +42,7 @@ def _total_covariant_derivative(
             return covariant_derivative(geometry, first, arg, z)
 
         corrected_rest = rest[:index] + (corrected_arg,) + rest[index + 1 :]
-        out = out - _total_covariant_derivative(
-            geometry, field, corrected_rest, x
-        )
+        out = out - _total_covariant_derivative(geometry, field, corrected_rest, x)
     return out
 
 
@@ -60,19 +58,6 @@ def form_pseudo_bialgebra_map(
     aligned with ``basis.keys``.
     """
 
-    if basis.kind not in {"lyndon", "kauri", "kauri_planar"}:
-        raise ValueError(f"Unsupported basis kind {basis.kind!r}.")
-
-    children = tuple(
-        tuple(
-            int(child)
-            for child in basis.child_ids[
-                basis.child_ptr[index] : basis.child_ptr[index + 1]
-            ]
-        )
-        for index in range(len(basis.keys))
-    )
-    root_colours = tuple(int(colour) for colour in basis.root_colour)
     lifted: list[LiftedField | None] = [None] * len(basis.keys)
 
     def build(index: int) -> LiftedField:
@@ -80,8 +65,8 @@ def form_pseudo_bialgebra_map(
         if cached is not None:
             return cached
 
-        child_ids = children[index]
-        root_colour = root_colours[index]
+        child_ids = basis.children[index]
+        root_colour = basis.root_colour[index]
         if not child_ids:
 
             def field(x: Array, *, root_colour: int = root_colour) -> Array:

@@ -12,7 +12,6 @@ dependencies = [
     "diffrax>=0.7.1",
     "jax[cuda]>=0.9.1",
     "pysiglib[cuda]>=3.0.1",
-    "kauri",
     "georax",
 ]
 

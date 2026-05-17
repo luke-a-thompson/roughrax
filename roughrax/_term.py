@@ -5,7 +5,7 @@ from typing import Any, Literal
 import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
-import pysiglib
+import pysiglib.jax_api as pysiglib
 from diffrax import AbstractPath, AbstractTerm
 from diffrax._term import WrapTerm
 from georax import Euclidean, Manifold
@@ -13,9 +13,9 @@ from jaxtyping import Array
 
 from roughrax._bases import (
     PrimitiveBasis,
-    make_kauri_planar_tree_basis,
-    make_kauri_tree_basis,
     make_lyndon_basis,
+    make_planar_tree_basis,
+    make_tree_basis,
 )
 from roughrax._pseudo_bialgebra_map import (
     LiftedField,
@@ -48,7 +48,7 @@ class RoughTerm(AbstractTerm[Array, Array]):
     vector_field: VectorField = eqx.field(static=True)
     control: AbstractPath
     basis: PrimitiveBasis = eqx.field(static=True)
-    geometry: Manifold[Any]
+    geometry: Manifold[ Any]
     lifted_fields: tuple[LiftedField, ...] = eqx.field(static=True)
 
     def __init__(
@@ -59,7 +59,7 @@ class RoughTerm(AbstractTerm[Array, Array]):
         *,
         depth: int,
         interval_ts: Array | None = None,
-        solution: Literal["ito", "stratonovich"] = "ito",
+        solution: Literal["ito", "stratonovich"],
     ):
         ts = getattr(control, "ts", None)
         ys = getattr(control, "ys", None)
@@ -86,13 +86,16 @@ class RoughTerm(AbstractTerm[Array, Array]):
             case "ito":
                 planar = non_euclidean
                 primitive_basis = (
-                    make_kauri_planar_tree_basis(depth, dim)
+                    make_planar_tree_basis(depth, dim)
                     if planar
-                    else make_kauri_tree_basis(depth, dim)
+                    else make_tree_basis(depth, dim)
                 )
                 pysiglib.prepare_branched_sig(dim, depth, planar=planar)
                 coeffs = [
-                    pysiglib.branched_sig(s, depth, planar=planar) for s in slices
+                    pysiglib.branched_sig(
+                        s, depth, tree_order="canonical", planar=planar
+                    )
+                    for s in slices
                 ]
             case "stratonovich":
                 primitive_basis = make_lyndon_basis(depth, dim)
@@ -129,8 +132,6 @@ class RoughTerm(AbstractTerm[Array, Array]):
 def unwrap_rough_term(term) -> RoughTerm:
     while isinstance(term, WrapTerm):
         term = term.term
-    if not isinstance(term, RoughTerm):
-        raise TypeError(f"Expected RoughTerm, got {type(term).__name__}.")
     return term
 
 
