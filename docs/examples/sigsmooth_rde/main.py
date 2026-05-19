@@ -24,7 +24,7 @@ ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from roughrax import LogODE, RoughTerm, signature_to_loopy_path
+from roughrax import LogODE, RoughTerm, nonstandard_wong_zakai
 
 DEGREE = 2
 PATH_DIM = 24
@@ -83,9 +83,8 @@ def sample_driver() -> tuple[np.ndarray, np.ndarray]:
     ts = np.linspace(0.0, T1, FINE_N + 1)
     channels = np.arange(1, PATH_DIM + 1, dtype=np.float64)
     slopes = np.linspace(DRIFT_0, DRIFT_1, PATH_DIM, dtype=np.float64)
-    drift = (
-        ts[:, None] * slopes[None, :]
-        + DRIFT_SINE * np.sin(2.0 * np.pi * channels[None, :] * ts[:, None] / T1)
+    drift = ts[:, None] * slopes[None, :] + DRIFT_SINE * np.sin(
+        2.0 * np.pi * channels[None, :] * ts[:, None] / T1
     )
     return ts, NOISE_SCALE * noise + drift
 
@@ -107,7 +106,7 @@ def make_loopy_driver(
         left_index, right_index = np.searchsorted(ts, [left, right])
         interval = np.array(xs[left_index : right_index + 1], copy=True, order="C")
         interval_sig = pysiglib.sig(interval, DEGREE)
-        loop = signature_to_loopy_path(
+        loop = nonstandard_wong_zakai(
             interval_sig,
             PATH_DIM,
             DEGREE,

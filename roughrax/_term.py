@@ -48,7 +48,7 @@ class RoughTerm(AbstractTerm[Array, Array]):
     vector_field: VectorField = eqx.field(static=True)
     control: AbstractPath
     basis: PrimitiveBasis = eqx.field(static=True)
-    geometry: Manifold[ Any]
+    geometry: Manifold[Any]
     lifted_fields: tuple[LiftedField, ...] = eqx.field(static=True)
 
     def __init__(

@@ -20,7 +20,7 @@ import jax
 import jax.numpy as jnp
 import matplotlib
 import numpy as np
-from georax import CFEES25, Euclidean, GeometricTerm, RKMK, SO
+from georax import CFEES25, Euclidean, GeometricTerm, SO
 
 from roughrax import LogODE, RoughTerm
 
