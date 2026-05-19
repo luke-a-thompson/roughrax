@@ -22,6 +22,7 @@ from roughrax._pseudo_bialgebra_map import (
     VectorField,
     form_pseudo_bialgebra_map,
 )
+from roughrax._signature import signature_tensors_from_log_signature
 
 
 class _SignaturePath(AbstractPath):
@@ -42,6 +43,26 @@ class _SignaturePath(AbstractPath):
         return self.coeffs[index]
 
 
+class _Depth3WordSignaturePath(AbstractPath):
+    ts: Array
+    dxs: Array
+    x2s: Array
+    x3s: Array
+
+    @property
+    def t0(self):
+        return self.ts[0]
+
+    @property
+    def t1(self):
+        return self.ts[-1]
+
+    def evaluate(self, t0, t1=None, left=True):
+        del t1, left
+        index = jnp.searchsorted(self.ts, t0, side="right") - 1
+        return self.dxs[index], self.x2s[index], self.x3s[index]
+
+
 class RoughTerm(AbstractTerm[Array, Array]):
     """Diffrax term over internally lifted rough-path coefficients."""
 
@@ -50,6 +71,7 @@ class RoughTerm(AbstractTerm[Array, Array]):
     basis: PrimitiveBasis = eqx.field(static=True)
     geometry: Manifold[ Any]
     lifted_fields: tuple[LiftedField, ...] = eqx.field(static=True)
+    depth3_word_control: AbstractPath | None
 
     def __init__(
         self,
@@ -59,6 +81,7 @@ class RoughTerm(AbstractTerm[Array, Array]):
         *,
         depth: int,
         interval_ts: Array | None = None,
+        precompute_depth3_words: bool = False,
         solution: Literal["ito", "stratonovich"],
     ):
         ts = getattr(control, "ts", None)
@@ -104,7 +127,25 @@ class RoughTerm(AbstractTerm[Array, Array]):
             case _:
                 raise ValueError(f"Unknown solution type {solution!r}.")
 
-        coeff_control = _SignaturePath(jnp.asarray(interval_ts_np), jnp.asarray(coeffs))
+        coeffs_array = jnp.asarray(coeffs)
+        coeff_control = _SignaturePath(jnp.asarray(interval_ts_np), coeffs_array)
+        depth3_word_control = None
+        if (
+            precompute_depth3_words
+            and primitive_basis.kind == "lyndon"
+            and primitive_basis.depth >= 3
+        ):
+            dxs, x2s, x3s = signature_tensors_from_log_signature(
+                coeffs_array,
+                primitive_basis.keys,
+                dim,
+            )
+            depth3_word_control = _Depth3WordSignaturePath(
+                jnp.asarray(interval_ts_np),
+                dxs,
+                x2s,
+                x3s,
+            )
 
         self.vector_field = vector_field
         self.control = coeff_control
@@ -113,6 +154,7 @@ class RoughTerm(AbstractTerm[Array, Array]):
         self.lifted_fields = form_pseudo_bialgebra_map(
             vector_field, primitive_basis, geometry
         )
+        self.depth3_word_control = depth3_word_control
 
     def vf(self, t, y, args):
         del t, args
@@ -120,6 +162,11 @@ class RoughTerm(AbstractTerm[Array, Array]):
 
     def contr(self, t0, t1, **kwargs):
         return self.control.evaluate(t0, t1, **kwargs)
+
+    def depth3_word_contr(self, t0, t1, **kwargs):
+        if self.depth3_word_control is None:
+            raise ValueError("Depth-3 word signatures are not available for this term.")
+        return self.depth3_word_control.evaluate(t0, t1, **kwargs)
 
     def prod(self, vf, control):
         return jnp.tensordot(control, vf, axes=1)

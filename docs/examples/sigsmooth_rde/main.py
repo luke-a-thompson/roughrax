@@ -1,4 +1,5 @@
 """Compare Log-ODE and loopy-path ODE errors against fine Wong-Zakai."""
+# ruff: noqa: E402
 
 from __future__ import annotations
 
@@ -6,13 +7,17 @@ import os
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
+# Keep CUDA first for computation, but expose CPU too; JAX pure_callback needs a
+# local CPU device for host-side callback plumbing.
 platforms = [p.strip() for p in os.environ.get("JAX_PLATFORMS", "cuda,cpu").split(",")]
 if "cuda" in platforms and "cpu" not in platforms:
     platforms.append("cpu")
 os.environ["JAX_PLATFORMS"] = ",".join(platforms)
 
 import diffrax
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -24,12 +29,20 @@ ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from roughrax import LogODE, RoughTerm, signature_to_loopy_path
+from roughrax import (
+    DFRoughRK3,
+    LogODE,
+    RoesslerWord3,
+    RoughTerm,
+    SignatureIncrement,
+    SignatureRDETerm,
+    signature_to_loopy_path,
+)
 
-DEGREE = 2
-PATH_DIM = 24
-FINE_N = 2**10
-COARSE_STRIDE = 4
+DEGREE = int(os.environ.get("SIGSMOOTH_DEGREE", "3"))
+PATH_DIM = int(os.environ.get("SIGSMOOTH_PATH_DIM", "3"))
+FINE_N = int(os.environ.get("SIGSMOOTH_FINE_N", str(2**10)))
+COARSE_STRIDE = int(os.environ.get("SIGSMOOTH_COARSE_STRIDE", "4"))
 T1 = 1.0
 HURST = 0.25
 SEED = 1
@@ -39,6 +52,7 @@ DRIFT_1 = -0.05
 DRIFT_SINE = 0.04
 Y0 = 0.3
 BENCHMARK_REPEATS = 5
+MAX_STEPS_BUFFER = 4
 
 REFERENCE_SOLVER = diffrax.Tsit5()
 METHOD_SOLVER = diffrax.Heun()
@@ -83,9 +97,8 @@ def sample_driver() -> tuple[np.ndarray, np.ndarray]:
     ts = np.linspace(0.0, T1, FINE_N + 1)
     channels = np.arange(1, PATH_DIM + 1, dtype=np.float64)
     slopes = np.linspace(DRIFT_0, DRIFT_1, PATH_DIM, dtype=np.float64)
-    drift = (
-        ts[:, None] * slopes[None, :]
-        + DRIFT_SINE * np.sin(2.0 * np.pi * channels[None, :] * ts[:, None] / T1)
+    drift = ts[:, None] * slopes[None, :] + DRIFT_SINE * np.sin(
+        2.0 * np.pi * channels[None, :] * ts[:, None] / T1
     )
     return ts, NOISE_SCALE * noise + drift
 
@@ -144,7 +157,18 @@ def benchmark_lowered(fn) -> tuple[float, float, float, float]:
     return float(value), compile_time, min(times), float(np.mean(times))
 
 
+class RoughDepth3SignaturePath(eqx.Module):
+    rough_term: Any
+
+    def evaluate(self, t0, t1, **kwargs):
+        dx, x2, x3 = self.rough_term.depth3_word_contr(t0, t1, **kwargs)
+        return SignatureIncrement(dx, x2, x3)
+
+
 def main() -> None:
+    if DEGREE < 3:
+        raise ValueError("SIGSMOOTH_DEGREE must be at least 3 for RoesslerWord3.")
+
     y0 = jnp.asarray(Y0)
 
     start = time.perf_counter()
@@ -160,9 +184,19 @@ def main() -> None:
         Euclidean(),
         depth=DEGREE,
         interval_ts=jnp.asarray(coarse_ts),
+        precompute_depth3_words=True,
         solution="stratonovich",
     )
     logode_preprocess_time = time.perf_counter() - start
+
+    def signature_vector_field(t, y, args):
+        del t, args
+        return vector_field(y)
+
+    signature_term = SignatureRDETerm(
+        vector_field=signature_vector_field,
+        signature_path=RoughDepth3SignaturePath(rough_term),
+    )
 
     start = time.perf_counter()
     loop_ts, loop_xs, sig_error = make_loopy_driver(ts, xs, coarse_ts)
@@ -182,6 +216,7 @@ def main() -> None:
             y0=y0,
             stepsize_controller=diffrax.StepTo(jnp.asarray(ts)),
             saveat=diffrax.SaveAt(t1=True),
+            max_steps=len(ts) + MAX_STEPS_BUFFER,
         )
         return sol.ys[-1]
 
@@ -195,6 +230,7 @@ def main() -> None:
             y0=y0,
             stepsize_controller=diffrax.StepTo(jnp.asarray(coarse_ts)),
             saveat=diffrax.SaveAt(t1=True),
+            max_steps=len(coarse_ts) + MAX_STEPS_BUFFER,
         )
         return sol.ys[-1]
 
@@ -208,12 +244,48 @@ def main() -> None:
             y0=y0,
             stepsize_controller=diffrax.StepTo(jnp.asarray(loop_ts)),
             saveat=diffrax.SaveAt(t1=True),
+            max_steps=len(loop_ts) + MAX_STEPS_BUFFER,
+        )
+        return sol.ys[-1]
+
+    def solve_roessler_word3():
+        sol = diffrax.diffeqsolve(
+            rough_term,
+            RoesslerWord3(),
+            t0=float(coarse_ts[0]),
+            t1=float(coarse_ts[-1]),
+            dt0=None,
+            y0=y0,
+            stepsize_controller=diffrax.StepTo(jnp.asarray(coarse_ts)),
+            saveat=diffrax.SaveAt(t1=True),
+            max_steps=len(coarse_ts) + MAX_STEPS_BUFFER,
+        )
+        return sol.ys[-1]
+
+    def solve_df_rough_rk3():
+        sol = diffrax.diffeqsolve(
+            signature_term,
+            DFRoughRK3(rho_floor=0.0),
+            t0=float(coarse_ts[0]),
+            t1=float(coarse_ts[-1]),
+            dt0=float(coarse_ts[1] - coarse_ts[0]),
+            y0=y0,
+            stepsize_controller=diffrax.ConstantStepSize(),
+            saveat=diffrax.SaveAt(t1=True),
+            max_steps=len(coarse_ts) + MAX_STEPS_BUFFER,
         )
         return sol.ys[-1]
 
     y_wz, wz_compile, wz_best, wz_mean = benchmark_lowered(solve_fine_wz)
     y_logode, logode_compile, logode_best, logode_mean = benchmark_lowered(solve_logode)
     y_loop, loop_compile, loop_best, loop_mean = benchmark_lowered(solve_loopy_ode)
+    (
+        y_roessler,
+        roessler_compile,
+        roessler_best,
+        roessler_mean,
+    ) = benchmark_lowered(solve_roessler_word3)
+    y_df, df_compile, df_best, df_mean = benchmark_lowered(solve_df_rough_rk3)
 
     print("configuration")
     print(f"degree: {DEGREE}")
@@ -222,6 +294,7 @@ def main() -> None:
     print(f"coarse_stride: {COARSE_STRIDE}")
     print(f"coarse steps: {len(coarse_ts) - 1}")
     print(f"benchmark repeats: {BENCHMARK_REPEATS}")
+    print(f"max_steps_buffer: {MAX_STEPS_BUFFER}")
     print(f"jax platforms: {os.environ['JAX_PLATFORMS']}")
     print(f"jax default backend: {jax.default_backend()}")
     print(f"jax devices: {jax.devices()}")
@@ -229,7 +302,7 @@ def main() -> None:
     print()
     print("preprocessing")
     print(f"sample driver: {sample_time:.3f}s")
-    print(f"log-ode rough term: {logode_preprocess_time:.3f}s")
+    print(f"shared rough term + roessler word tensors: {logode_preprocess_time:.3f}s")
     print(f"loopy driver: {loopy_preprocess_time:.3f}s")
 
     print()
@@ -245,9 +318,15 @@ def main() -> None:
     print(f"fine WZ y(T): {y_wz:.12f}")
     print(f"log-ode y(T): {y_logode:.12f}")
     print(f"loopy ODE y(T): {y_loop:.12f}")
+    print(f"roessler word3 y(T): {y_roessler:.12f}")
+    print(f"df rough RK3 y(T): {y_df:.12f}")
     print(f"log-ode error vs fine WZ: {abs(y_logode - y_wz):.3e}")
     print(f"loopy ODE error vs fine WZ: {abs(y_loop - y_wz):.3e}")
+    print(f"roessler error vs fine WZ: {abs(y_roessler - y_wz):.3e}")
+    print(f"df rough RK3 error vs fine WZ: {abs(y_df - y_wz):.3e}")
     print(f"log-ode vs loopy difference: {abs(y_loop - y_logode):.3e}")
+    print(f"roessler vs log-ode difference: {abs(y_roessler - y_logode):.3e}")
+    print(f"df rough RK3 vs log-ode difference: {abs(y_df - y_logode):.3e}")
 
     print()
     print("timing, compiled solve only")
@@ -265,6 +344,17 @@ def main() -> None:
         "loopy ODE timing: "
         f"compile={loop_compile:.3f}s, best={loop_best * 1e3:.3f}ms, "
         f"mean={loop_mean * 1e3:.3f}ms"
+    )
+    print(
+        "roessler word3 timing: "
+        f"compile={roessler_compile:.3f}s, "
+        f"best={roessler_best * 1e3:.3f}ms, "
+        f"mean={roessler_mean * 1e3:.3f}ms"
+    )
+    print(
+        "df rough RK3 timing: "
+        f"compile={df_compile:.3f}s, best={df_best * 1e3:.3f}ms, "
+        f"mean={df_mean * 1e3:.3f}ms"
     )
 
 

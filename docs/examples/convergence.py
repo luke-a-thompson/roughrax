@@ -1,4 +1,4 @@
-"""Log-ODE and SO(3) RDE convergence against fine Wong-Zakai references."""
+"""Log-ODE, Roessler, and SO(3) RDE convergence against fine Wong-Zakai references."""
 
 from __future__ import annotations
 
@@ -20,14 +20,24 @@ import jax
 import jax.numpy as jnp
 import matplotlib
 import numpy as np
-from georax import CFEES25, Euclidean, GeometricTerm, RKMK, SO
+from georax import CFEES25, Euclidean, GeometricTerm, SO
 
-from roughrax import LogODE, RoughTerm
+from roughrax import LogODE, RoesslerWord3, RoughTerm
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 jax.config.update("jax_enable_x64", True)
+
+# Toggle convergence runs here.
+RUN_GEOMETRIC = False
+RUN_GEOMETRIC_SO = False
+RUN_BRANCHED = False
+RUN_BRANCHED_SO = False
+RUN_ROESSLER = True
+
+TEST_DEPTHS = (1, 2, 3)
+ROESSLER_DEPTH = 3
 
 
 def to_numpy_and_clear_cache(x) -> np.ndarray:
@@ -146,6 +156,39 @@ def solve_log_ode(
     return to_numpy_and_clear_cache(sol.ys)
 
 
+def solve_roessler_word3(
+    ts: np.ndarray,
+    xs: np.ndarray,
+    *,
+    coarse_exponent: int,
+    fine_exponent: int,
+    y0: float,
+) -> np.ndarray:
+    coarse_ts = jnp.asarray(ts[:: 2 ** (fine_exponent - coarse_exponent)])
+    driver = diffrax.LinearInterpolation(ts=jnp.asarray(ts), ys=jnp.asarray(xs))
+    term = RoughTerm(
+        rough_vector_field,
+        driver,
+        Euclidean(),
+        depth=ROESSLER_DEPTH,
+        interval_ts=coarse_ts,
+        solution="stratonovich",
+    )
+
+    sol = diffrax.diffeqsolve(
+        term,
+        RoesslerWord3(),
+        t0=float(coarse_ts[0]),
+        t1=float(coarse_ts[-1]),
+        dt0=None,
+        y0=jnp.asarray(y0),
+        stepsize_controller=diffrax.StepTo(coarse_ts),
+        saveat=diffrax.SaveAt(ts=coarse_ts),
+        max_steps=len(coarse_ts) + 4,
+    )
+    return to_numpy_and_clear_cache(sol.ys)
+
+
 def solve_so3_rde(
     ts: np.ndarray,
     xs: np.ndarray,
@@ -191,7 +234,9 @@ def plot_convergence(
     *,
     output: Path,
 ) -> None:
-    fig, axes = plt.subplots(len(rows), 3, figsize=(11, 3.4 * len(rows)), sharex=True)
+    fig, axes = plt.subplots(
+        len(rows), len(TEST_DEPTHS), figsize=(11, 3.4 * len(rows)), sharex=True
+    )
     axes = np.asarray(axes)
     if axes.ndim == 1:
         axes = axes[None, :]
@@ -199,8 +244,14 @@ def plot_convergence(
     for row_axes, (title_prefix, ylabel, mean_errors_by_depth) in zip(
         axes, rows, strict=True
     ):
-        for ax, depth in zip(row_axes, (1, 2, 3), strict=True):
-            errors = mean_errors_by_depth[depth]
+        first_visible_ax = None
+        for ax, depth in zip(row_axes, TEST_DEPTHS, strict=True):
+            errors = mean_errors_by_depth.get(depth)
+            if errors is None:
+                ax.set_visible(False)
+                continue
+            if first_visible_ax is None:
+                first_visible_ax = ax
             rate = 0.5 * depth
             ax.loglog(h, errors, "x", color="red", markersize=7, label="sampled")
             ax.loglog(
@@ -214,7 +265,8 @@ def plot_convergence(
             ax.set_xlabel("step size")
             ax.grid(True, which="both", alpha=0.25)
             ax.legend()
-        row_axes[0].set_ylabel(ylabel)
+        if first_visible_ax is not None:
+            first_visible_ax.set_ylabel(ylabel)
     fig.tight_layout()
     output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output, dpi=200)
@@ -242,6 +294,34 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def empty_errors_by_depth(
+    coarse_exponents: list[int], depths: tuple[int, ...]
+) -> dict[int, np.ndarray]:
+    return {
+        depth: np.zeros(len(coarse_exponents), dtype=np.float64) for depth in depths
+    }
+
+
+def mean_errors_by_depth(
+    errors_by_depth: dict[int, np.ndarray], num_paths: int
+) -> dict[int, np.ndarray]:
+    return {
+        depth: np.maximum(errors / num_paths, np.finfo(np.float64).tiny)
+        for depth, errors in errors_by_depth.items()
+    }
+
+
+def enabled_test_names() -> list[str]:
+    enabled_tests = [
+        ("geometric", RUN_GEOMETRIC),
+        ("geometric so", RUN_GEOMETRIC_SO),
+        ("branched", RUN_BRANCHED),
+        ("branched so", RUN_BRANCHED_SO),
+        ("roessler", RUN_ROESSLER),
+    ]
+    return [name for name, enabled in enabled_tests if enabled]
+
+
 def main() -> None:
     args = parse_args()
     if args.num_paths < 1:
@@ -249,173 +329,209 @@ def main() -> None:
     if any(k >= args.fine_exponent for k in args.coarse_exponents):
         raise ValueError("Every coarse exponent must be smaller than --fine-exponent.")
 
+    selected_tests = enabled_test_names()
+    if not selected_tests:
+        raise ValueError("At least one RUN_* convergence test must be enabled.")
+    print(f"enabled convergence tests: {', '.join(selected_tests)}")
+
     h = np.asarray([args.t1 / 2**k for k in args.coarse_exponents], dtype=np.float64)
-    stratonovich_errors_by_depth = {
-        depth: np.zeros(len(args.coarse_exponents), dtype=np.float64)
-        for depth in (1, 2, 3)
-    }
-    ito_errors_by_depth = {
-        depth: np.zeros(len(args.coarse_exponents), dtype=np.float64)
-        for depth in (1, 2, 3)
-    }
-    for path_index in range(args.num_paths):
-        path_seed = args.seed + path_index
-        print(
-            f"sampling Brownian path {path_index + 1}/{args.num_paths} "
-            f"on {2**args.fine_exponent} fine steps"
+
+    rows: list[tuple[str, str, dict[int, np.ndarray]]] = []
+    run_euclidean_tests = RUN_GEOMETRIC or RUN_BRANCHED or RUN_ROESSLER
+    if run_euclidean_tests:
+        stratonovich_errors_by_depth = empty_errors_by_depth(
+            args.coarse_exponents, TEST_DEPTHS
         )
-        ts, xs = brownian_samples(
-            exponent=args.fine_exponent,
-            seed=path_seed,
-            t1=args.t1,
-            dim=2,
+        ito_errors_by_depth = empty_errors_by_depth(args.coarse_exponents, TEST_DEPTHS)
+        roessler_errors_by_depth = empty_errors_by_depth(
+            args.coarse_exponents, (ROESSLER_DEPTH,)
         )
 
-        print(f"solving fine Wong-Zakai reference for path {path_index + 1}")
-        y_ref = solve_fine_wong_zakai(ts, xs, args.y0)
-        print(f"path {path_index + 1} reference y({args.t1}) = {y_ref[-1]:.8e}")
+        for path_index in range(args.num_paths):
+            path_seed = args.seed + path_index
+            print(
+                f"sampling Brownian path {path_index + 1}/{args.num_paths} "
+                f"on {2**args.fine_exponent} fine steps"
+            )
+            ts, xs = brownian_samples(
+                exponent=args.fine_exponent,
+                seed=path_seed,
+                t1=args.t1,
+                dim=2,
+            )
 
-        for depth in (1, 2, 3):
-            for i, k in enumerate(args.coarse_exponents):
-                print(
-                    f"solving Log-ODE Stratonovich order {depth} on {2**k} steps "
-                    f"for path {path_index + 1}"
-                )
-                y = solve_log_ode(
-                    ts,
-                    xs,
-                    depth=depth,
-                    coarse_exponent=k,
-                    fine_exponent=args.fine_exponent,
-                    y0=args.y0,
-                    solution="stratonovich",
-                )
-                step = 2 ** (args.fine_exponent - k)
-                stratonovich_errors_by_depth[depth][i] += float(
-                    np.max(np.abs(y - y_ref[::step]))
-                )
+            print(f"solving fine Wong-Zakai reference for path {path_index + 1}")
+            y_ref = solve_fine_wong_zakai(ts, xs, args.y0)
+            print(f"path {path_index + 1} reference y({args.t1}) = {y_ref[-1]:.8e}")
 
-                print(
-                    f"solving Log-ODE branched Ito order {depth} on {2**k} steps "
-                    f"for path {path_index + 1}"
-                )
-                y = solve_log_ode(
-                    ts,
-                    xs,
-                    depth=depth,
-                    coarse_exponent=k,
-                    fine_exponent=args.fine_exponent,
-                    y0=args.y0,
-                    solution="ito",
-                )
-                ito_errors_by_depth[depth][i] += float(
-                    np.max(np.abs(y - y_ref[::step]))
-                )
+            for depth in TEST_DEPTHS:
+                for i, k in enumerate(args.coarse_exponents):
+                    step = 2 ** (args.fine_exponent - k)
+                    if RUN_GEOMETRIC:
+                        print(
+                            f"solving Log-ODE Stratonovich order {depth} "
+                            f"on {2**k} steps for path {path_index + 1}"
+                        )
+                        y = solve_log_ode(
+                            ts,
+                            xs,
+                            depth=depth,
+                            coarse_exponent=k,
+                            fine_exponent=args.fine_exponent,
+                            y0=args.y0,
+                            solution="stratonovich",
+                        )
+                        stratonovich_errors_by_depth[depth][i] += float(
+                            np.max(np.abs(y - y_ref[::step]))
+                        )
 
-    mean_stratonovich_errors_by_depth = {
-        depth: np.maximum(errors / args.num_paths, np.finfo(np.float64).tiny)
-        for depth, errors in stratonovich_errors_by_depth.items()
-    }
-    mean_ito_errors_by_depth = {
-        depth: np.maximum(errors / args.num_paths, np.finfo(np.float64).tiny)
-        for depth, errors in ito_errors_by_depth.items()
-    }
+                    if RUN_BRANCHED:
+                        print(
+                            f"solving Log-ODE branched Ito order {depth} "
+                            f"on {2**k} steps for path {path_index + 1}"
+                        )
+                        y = solve_log_ode(
+                            ts,
+                            xs,
+                            depth=depth,
+                            coarse_exponent=k,
+                            fine_exponent=args.fine_exponent,
+                            y0=args.y0,
+                            solution="ito",
+                        )
+                        ito_errors_by_depth[depth][i] += float(
+                            np.max(np.abs(y - y_ref[::step]))
+                        )
 
-    so3_stratonovich_errors_by_depth = {
-        depth: np.zeros(len(args.coarse_exponents), dtype=np.float64)
-        for depth in (1, 2, 3)
-    }
-    so3_ito_errors_by_depth = {
-        depth: np.zeros(len(args.coarse_exponents), dtype=np.float64)
-        for depth in (1, 2, 3)
-    }
-    for path_index in range(args.num_paths):
-        path_seed = args.seed + path_index
-        print(
-            f"sampling SO(3) Brownian path {path_index + 1}/{args.num_paths} "
-            f"on {2**args.fine_exponent} fine steps"
+            if RUN_ROESSLER:
+                for i, k in enumerate(args.coarse_exponents):
+                    print(
+                        f"solving Roessler Word3 order {ROESSLER_DEPTH} "
+                        f"on {2**k} steps for path {path_index + 1}"
+                    )
+                    y = solve_roessler_word3(
+                        ts,
+                        xs,
+                        coarse_exponent=k,
+                        fine_exponent=args.fine_exponent,
+                        y0=args.y0,
+                    )
+                    step = 2 ** (args.fine_exponent - k)
+                    roessler_errors_by_depth[ROESSLER_DEPTH][i] += float(
+                        np.max(np.abs(y - y_ref[::step]))
+                    )
+
+        if RUN_GEOMETRIC:
+            rows.append(
+                (
+                    "Log-ODE Stratonovich",
+                    "max absolute path error",
+                    mean_errors_by_depth(stratonovich_errors_by_depth, args.num_paths),
+                )
+            )
+        if RUN_BRANCHED:
+            rows.append(
+                (
+                    "Log-ODE branched Ito",
+                    "max absolute path error",
+                    mean_errors_by_depth(ito_errors_by_depth, args.num_paths),
+                )
+            )
+        if RUN_ROESSLER:
+            rows.append(
+                (
+                    "Roessler Word3",
+                    "max absolute path error",
+                    mean_errors_by_depth(roessler_errors_by_depth, args.num_paths),
+                )
+            )
+
+    run_so3_tests = RUN_GEOMETRIC_SO or RUN_BRANCHED_SO
+    if run_so3_tests:
+        so3_stratonovich_errors_by_depth = empty_errors_by_depth(
+            args.coarse_exponents, TEST_DEPTHS
         )
-        ts, xs = brownian_samples(
-            exponent=args.fine_exponent,
-            seed=path_seed,
-            t1=args.t1,
-            dim=3,
+        so3_ito_errors_by_depth = empty_errors_by_depth(
+            args.coarse_exponents, TEST_DEPTHS
         )
 
-        print(f"solving fine SO(3) Wong-Zakai reference for path {path_index + 1}")
-        y_ref = solve_so3_fine_wong_zakai(ts, xs)
-        print(
-            f"path {path_index + 1} reference det(y({args.t1})) = "
-            f"{np.linalg.det(y_ref[-1]):.8e}"
-        )
+        for path_index in range(args.num_paths):
+            path_seed = args.seed + path_index
+            print(
+                f"sampling SO(3) Brownian path {path_index + 1}/{args.num_paths} "
+                f"on {2**args.fine_exponent} fine steps"
+            )
+            ts, xs = brownian_samples(
+                exponent=args.fine_exponent,
+                seed=path_seed,
+                t1=args.t1,
+                dim=3,
+            )
 
-        for depth in (1, 2, 3):
-            for i, k in enumerate(args.coarse_exponents):
-                print(
-                    f"solving SO(3) RDE Stratonovich order {depth} on {2**k} steps "
-                    f"for path {path_index + 1}"
-                )
-                y = solve_so3_rde(
-                    ts,
-                    xs,
-                    depth=depth,
-                    coarse_exponent=k,
-                    fine_exponent=args.fine_exponent,
-                    solution="stratonovich",
-                )
-                step = 2 ** (args.fine_exponent - k)
-                path_error = np.linalg.norm(y - y_ref[::step], axis=(-2, -1))
-                so3_stratonovich_errors_by_depth[depth][i] += float(np.max(path_error))
+            print(f"solving fine SO(3) Wong-Zakai reference for path {path_index + 1}")
+            y_ref = solve_so3_fine_wong_zakai(ts, xs)
+            print(
+                f"path {path_index + 1} reference det(y({args.t1})) = "
+                f"{np.linalg.det(y_ref[-1]):.8e}"
+            )
 
-                print(
-                    f"solving SO(3) RDE planar branched Ito order {depth} "
-                    f"on {2**k} steps for path {path_index + 1}"
-                )
-                y = solve_so3_rde(
-                    ts,
-                    xs,
-                    depth=depth,
-                    coarse_exponent=k,
-                    fine_exponent=args.fine_exponent,
-                    solution="ito",
-                )
-                path_error = np.linalg.norm(y - y_ref[::step], axis=(-2, -1))
-                so3_ito_errors_by_depth[depth][i] += float(np.max(path_error))
+            for depth in TEST_DEPTHS:
+                for i, k in enumerate(args.coarse_exponents):
+                    step = 2 ** (args.fine_exponent - k)
+                    if RUN_GEOMETRIC_SO:
+                        print(
+                            f"solving SO(3) RDE Stratonovich order {depth} "
+                            f"on {2**k} steps for path {path_index + 1}"
+                        )
+                        y = solve_so3_rde(
+                            ts,
+                            xs,
+                            depth=depth,
+                            coarse_exponent=k,
+                            fine_exponent=args.fine_exponent,
+                            solution="stratonovich",
+                        )
+                        path_error = np.linalg.norm(y - y_ref[::step], axis=(-2, -1))
+                        so3_stratonovich_errors_by_depth[depth][i] += float(
+                            np.max(path_error)
+                        )
 
-    mean_so3_stratonovich_errors_by_depth = {
-        depth: np.maximum(errors / args.num_paths, np.finfo(np.float64).tiny)
-        for depth, errors in so3_stratonovich_errors_by_depth.items()
-    }
-    mean_so3_ito_errors_by_depth = {
-        depth: np.maximum(errors / args.num_paths, np.finfo(np.float64).tiny)
-        for depth, errors in so3_ito_errors_by_depth.items()
-    }
-    plot_convergence(
-        h,
-        [
-            (
-                "Log-ODE Stratonovich",
-                "max absolute path error",
-                mean_stratonovich_errors_by_depth,
-            ),
-            (
-                "Log-ODE branched Ito",
-                "max absolute path error",
-                mean_ito_errors_by_depth,
-            ),
-            (
-                "SO(3) RDE Stratonovich",
-                "max Frobenius path error",
-                mean_so3_stratonovich_errors_by_depth,
-            ),
-            (
-                "SO(3) RDE planar branched Ito",
-                "max Frobenius path error",
-                mean_so3_ito_errors_by_depth,
-            ),
-        ],
-        output=args.output,
-    )
+                    if RUN_BRANCHED_SO:
+                        print(
+                            f"solving SO(3) RDE planar branched Ito order {depth} "
+                            f"on {2**k} steps for path {path_index + 1}"
+                        )
+                        y = solve_so3_rde(
+                            ts,
+                            xs,
+                            depth=depth,
+                            coarse_exponent=k,
+                            fine_exponent=args.fine_exponent,
+                            solution="ito",
+                        )
+                        path_error = np.linalg.norm(y - y_ref[::step], axis=(-2, -1))
+                        so3_ito_errors_by_depth[depth][i] += float(np.max(path_error))
+
+        if RUN_GEOMETRIC_SO:
+            rows.append(
+                (
+                    "SO(3) RDE Stratonovich",
+                    "max Frobenius path error",
+                    mean_errors_by_depth(
+                        so3_stratonovich_errors_by_depth, args.num_paths
+                    ),
+                )
+            )
+        if RUN_BRANCHED_SO:
+            rows.append(
+                (
+                    "SO(3) RDE planar branched Ito",
+                    "max Frobenius path error",
+                    mean_errors_by_depth(so3_ito_errors_by_depth, args.num_paths),
+                )
+            )
+
+    plot_convergence(h, rows, output=args.output)
     print(f"saved {args.output}")
 
 
