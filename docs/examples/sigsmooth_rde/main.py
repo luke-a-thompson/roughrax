@@ -1,16 +1,10 @@
-"""Compare Log-ODE and loopy-path ODE errors against fine Wong-Zakai."""
+"""Compare Log-ODE, loopy-path ODE, and polysig ODE against fine Wong-Zakai."""
 
 from __future__ import annotations
 
-import os
 import sys
 import time
 from pathlib import Path
-
-platforms = [p.strip() for p in os.environ.get("JAX_PLATFORMS", "cuda,cpu").split(",")]
-if "cuda" in platforms and "cpu" not in platforms:
-    platforms.append("cpu")
-os.environ["JAX_PLATFORMS"] = ",".join(platforms)
 
 import diffrax
 import jax
@@ -24,10 +18,17 @@ ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from roughrax import LogODE, RoughTerm, nonstandard_wong_zakai
+from roughrax import (  # noqa: E402
+    LogODE,
+    RoughTerm,
+    evaluate_legendre_expansion,
+    nonstandard_wong_zakai,
+    realise_polynomial_logsignatures,
+)
+from roughrax._bases import make_lyndon_basis  # noqa: E402
 
-DEGREE = 2
-PATH_DIM = 24
+DEGREE = 3
+PATH_DIM = 4
 FINE_N = 2**10
 COARSE_STRIDE = 4
 T1 = 1.0
@@ -37,11 +38,22 @@ NOISE_SCALE = 0.25
 DRIFT_0 = 0.12
 DRIFT_1 = -0.05
 DRIFT_SINE = 0.04
-Y0 = 0.3
-BENCHMARK_REPEATS = 5
+Y0 = jnp.asarray(0.3)
+BENCHMARK_REPEATS = 1
 
 REFERENCE_SOLVER = diffrax.Tsit5()
 METHOD_SOLVER = diffrax.Heun()
+ROUGHNESS_P = 1.0 / HURST + 0.1
+POLYSIG_SIG_TOL = 2e-5
+POLYSIG_MAX_ITERATIONS = 60
+POLYSIG_POLYNOMIAL_DEGREE = 8
+POLYSIG_ODE_ATOL_SAFETY = 1.0
+POLYSIG_SEGMENT_MAX_STEPS = 128
+PROGRESS_REFRESH_STEPS = 20
+
+
+def progress_meter():
+    return diffrax.TqdmProgressMeter(refresh_steps=PROGRESS_REFRESH_STEPS)
 
 
 def path_length(xs: np.ndarray) -> float:
@@ -52,9 +64,7 @@ def vector_field(y):
     indices = jnp.arange(PATH_DIM)
     frequencies = (indices // 2 + 1).astype(jnp.asarray(y).dtype)
     return jnp.where(
-        indices % 2 == 0,
-        jnp.cos(frequencies * y),
-        jnp.sin(frequencies * y),
+        indices % 2 == 0, jnp.cos(frequencies * y), jnp.sin(frequencies * y)
     )
 
 
@@ -64,9 +74,6 @@ def control_vector_field(t, y, args):
 
 
 def sample_driver() -> tuple[np.ndarray, np.ndarray]:
-    if PATH_DIM < 1:
-        raise ValueError("PATH_DIM must be positive.")
-
     state = np.random.get_state()
     np.random.seed(SEED)
     try:
@@ -89,28 +96,17 @@ def sample_driver() -> tuple[np.ndarray, np.ndarray]:
     return ts, NOISE_SCALE * noise + drift
 
 
-def make_loopy_driver(
-    ts: np.ndarray,
-    xs: np.ndarray,
-    coarse_ts: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, float]:
-    if xs.shape[-1] != PATH_DIM:
-        raise ValueError(f"Expected driver dimension {PATH_DIM}, got {xs.shape[-1]}.")
-
-    loop_ts = []
-    loop_xs = []
+def make_loopy_driver(ts, xs, coarse_ts):
+    loop_ts, loop_xs = [], []
     basepoint = xs[0]
     max_sig_error = 0.0
 
     for left, right in zip(coarse_ts[:-1], coarse_ts[1:], strict=True):
         left_index, right_index = np.searchsorted(ts, [left, right])
-        interval = np.array(xs[left_index : right_index + 1], copy=True, order="C")
+        interval = np.ascontiguousarray(xs[left_index : right_index + 1])
         interval_sig = pysiglib.sig(interval, DEGREE)
         loop = nonstandard_wong_zakai(
-            interval_sig,
-            PATH_DIM,
-            DEGREE,
-            basepoint=basepoint,
+            interval_sig, PATH_DIM, DEGREE, basepoint=basepoint
         )
         max_sig_error = max(
             max_sig_error,
@@ -128,143 +124,262 @@ def make_loopy_driver(
     return np.concatenate(loop_ts), np.concatenate(loop_xs), max_sig_error
 
 
-def benchmark_lowered(fn) -> tuple[float, float, float, float]:
+def make_polysig_targets(ts, xs, coarse_ts):
+    pysiglib.prepare_log_sig(PATH_DIM, DEGREE, 1, device="cpu")
+    indices = np.searchsorted(ts, coarse_ts)
+    return np.stack(
+        [
+            pysiglib.log_sig(
+                np.ascontiguousarray(xs[indices[j] : indices[j + 1] + 1]),
+                DEGREE,
+                method=1,
+            )
+            for j in range(len(indices) - 1)
+        ]
+    )
+
+
+def polysig_global_vector_field(u, y, coefficients):
+    window_count = coefficients.shape[0]
+    window = jnp.clip(jnp.floor(u).astype(jnp.int32), 0, window_count - 1)
+    local_u = u - window.astype(u.dtype)
+    dot_x = evaluate_legendre_expansion(local_u, coefficients[window])
+    return jnp.tensordot(dot_x, vector_field(y), axes=1)
+
+
+def polysig_segment_vector_field(u, y, coefficients):
+    dot_x = evaluate_legendre_expansion(u, coefficients)
+    return jnp.tensordot(dot_x, vector_field(y), axes=1)
+
+
+def estimate_truncation_scales(logsignatures):
+    basis_degrees = np.asarray(make_lyndon_basis(DEGREE, PATH_DIM).degree)
+    scales = np.zeros(len(logsignatures))
+    for index, logsig in enumerate(logsignatures):
+        omega = 0.0
+        for level in range(1, DEGREE + 1):
+            level_norm = np.linalg.norm(logsig[basis_degrees == level])
+            if level_norm > 0:
+                omega = max(omega, level_norm ** (ROUGHNESS_P / level))
+        scales[index] = omega ** ((DEGREE + 1) / ROUGHNESS_P)
+    return scales
+
+
+def format_stats(stats) -> str:
+    def n(key):
+        return int(np.asarray(stats[key]))
+
+    return f"steps={n('num_steps')}, accepted={n('num_accepted_steps')}, rejected={n('num_rejected_steps')}"
+
+
+def benchmark(fn):
     start = time.perf_counter()
     compiled = jax.jit(fn).lower().compile()
     compile_time = time.perf_counter() - start
 
-    value = jax.block_until_ready(compiled())
+    value, stats = jax.block_until_ready(compiled())
     times = []
     for _ in range(BENCHMARK_REPEATS):
         start = time.perf_counter()
-        value = jax.block_until_ready(compiled())
+        value, _ = jax.block_until_ready(compiled())
         times.append(time.perf_counter() - start)
+    return float(value), stats, compile_time, min(times), float(np.mean(times))
 
-    return float(value), compile_time, min(times), float(np.mean(times))
+
+def timed(fn):
+    start = time.perf_counter()
+    result = fn()
+    return result, time.perf_counter() - start
+
+
+def step_to_solve(term, grid, solver, *, args=None):
+    sol = diffrax.diffeqsolve(
+        term,
+        solver,
+        t0=float(grid[0]),
+        t1=float(grid[-1]),
+        dt0=None,
+        y0=Y0,
+        args=args,
+        stepsize_controller=diffrax.StepTo(jnp.asarray(grid)),
+        saveat=diffrax.SaveAt(t1=True),
+        max_steps=len(grid) + 16,
+        progress_meter=progress_meter(),
+    )
+    return sol.ys[-1], sol.stats
 
 
 def main() -> None:
-    y0 = jnp.asarray(Y0)
-
-    start = time.perf_counter()
-    ts, xs = sample_driver()
-    sample_time = time.perf_counter() - start
+    (ts, xs), sample_time = timed(sample_driver)
     coarse_ts = ts[::COARSE_STRIDE]
     fine_driver = diffrax.LinearInterpolation(ts=jnp.asarray(ts), ys=jnp.asarray(xs))
 
-    start = time.perf_counter()
-    rough_term = RoughTerm(
-        vector_field,
-        fine_driver,
-        Euclidean(),
-        depth=DEGREE,
-        interval_ts=jnp.asarray(coarse_ts),
-        solution="stratonovich",
+    rough_term, logode_pp = timed(
+        lambda: RoughTerm(
+            vector_field,
+            fine_driver,
+            Euclidean(),
+            depth=DEGREE,
+            interval_ts=jnp.asarray(coarse_ts),
+            solution="stratonovich",
+        )
     )
-    logode_preprocess_time = time.perf_counter() - start
 
-    start = time.perf_counter()
-    loop_ts, loop_xs, sig_error = make_loopy_driver(ts, xs, coarse_ts)
-    loop_driver = diffrax.LinearInterpolation(
-        ts=jnp.asarray(loop_ts),
-        ys=jnp.asarray(loop_xs),
+    def build_loopy():
+        lts, lxs, sig_err = make_loopy_driver(ts, xs, coarse_ts)
+        driver = diffrax.LinearInterpolation(ts=jnp.asarray(lts), ys=jnp.asarray(lxs))
+        return lts, lxs, driver, sig_err
+
+    (loop_ts, loop_xs, loop_driver, sig_error), loopy_pp = timed(build_loopy)
+
+    def build_polysig():
+        targets = make_polysig_targets(ts, xs, coarse_ts)
+        scales = estimate_truncation_scales(targets)
+        realisation = realise_polynomial_logsignatures(
+            targets,
+            PATH_DIM,
+            DEGREE,
+            polynomial_degree=POLYSIG_POLYNOMIAL_DEGREE,
+            sig_tol=POLYSIG_SIG_TOL,
+            max_iterations=POLYSIG_MAX_ITERATIONS,
+            progress=True,
+        )
+        floor = np.finfo(np.asarray(Y0).dtype).eps
+        atols = np.maximum.reduce(
+            [
+                POLYSIG_ODE_ATOL_SAFETY * scales,
+                realisation.residual_norms,
+                np.full_like(scales, floor),
+            ]
+        )
+        return targets, scales, atols, realisation
+
+    (polysig_targets, polysig_scales, polysig_atols, polysig_realisation), polysig_pp = (
+        timed(build_polysig)
     )
-    loopy_preprocess_time = time.perf_counter() - start
+    polysig_coefficients = jnp.asarray(polysig_realisation.coefficients, dtype=Y0.dtype)
+    polysig_ode_atols = jnp.asarray(polysig_atols, dtype=Y0.dtype)
+    polysig_rtol = 0.0
+
+    print(
+        f"polysig ODE tolerance: p={ROUGHNESS_P:.3f}, rtol={polysig_rtol:.3e}, "
+        f"segment atol min={np.min(polysig_atols):.3e}, "
+        f"median={np.median(polysig_atols):.3e}, max={np.max(polysig_atols):.3e}",
+        flush=True,
+    )
 
     def solve_fine_wz():
-        sol = diffrax.diffeqsolve(
-            diffrax.ControlTerm(control_vector_field, fine_driver),
-            REFERENCE_SOLVER,
-            t0=float(ts[0]),
-            t1=float(ts[-1]),
-            dt0=None,
-            y0=y0,
-            stepsize_controller=diffrax.StepTo(jnp.asarray(ts)),
-            saveat=diffrax.SaveAt(t1=True),
+        return step_to_solve(
+            diffrax.ControlTerm(control_vector_field, fine_driver), ts, REFERENCE_SOLVER
         )
-        return sol.ys[-1]
 
     def solve_logode():
-        sol = diffrax.diffeqsolve(
-            rough_term,
-            LogODE(METHOD_SOLVER),
-            t0=float(coarse_ts[0]),
-            t1=float(coarse_ts[-1]),
-            dt0=None,
-            y0=y0,
-            stepsize_controller=diffrax.StepTo(jnp.asarray(coarse_ts)),
-            saveat=diffrax.SaveAt(t1=True),
-        )
-        return sol.ys[-1]
+        return step_to_solve(rough_term, coarse_ts, LogODE(METHOD_SOLVER))
 
     def solve_loopy_ode():
-        sol = diffrax.diffeqsolve(
+        return step_to_solve(
             diffrax.ControlTerm(control_vector_field, loop_driver),
+            loop_ts,
             METHOD_SOLVER,
-            t0=float(loop_ts[0]),
-            t1=float(loop_ts[-1]),
-            dt0=None,
-            y0=y0,
-            stepsize_controller=diffrax.StepTo(jnp.asarray(loop_ts)),
-            saveat=diffrax.SaveAt(t1=True),
         )
-        return sol.ys[-1]
 
-    y_wz, wz_compile, wz_best, wz_mean = benchmark_lowered(solve_fine_wz)
-    y_logode, logode_compile, logode_best, logode_mean = benchmark_lowered(solve_logode)
-    y_loop, loop_compile, loop_best, loop_mean = benchmark_lowered(solve_loopy_ode)
+    def solve_polysig_ode():
+        def segment_step(y, inputs):
+            coefficients, atol = inputs
+            sol = diffrax.diffeqsolve(
+                diffrax.ODETerm(polysig_segment_vector_field),
+                diffrax.Heun(),
+                t0=jnp.asarray(0.0, dtype=Y0.dtype),
+                t1=jnp.asarray(1.0, dtype=Y0.dtype),
+                dt0=None,
+                y0=y,
+                args=coefficients,
+                stepsize_controller=diffrax.PIDController(
+                    rtol=polysig_rtol,
+                    atol=atol,
+                ),
+                saveat=diffrax.SaveAt(t1=True),
+                max_steps=POLYSIG_SEGMENT_MAX_STEPS * 12,
+                progress_meter=diffrax.NoProgressMeter(),
+            )
+            stats = {
+                "num_steps": sol.stats["num_steps"],
+                "num_accepted_steps": sol.stats["num_accepted_steps"],
+                "num_rejected_steps": sol.stats["num_rejected_steps"],
+            }
+            return sol.ys[-1], stats
 
-    print("configuration")
-    print(f"degree: {DEGREE}")
-    print(f"path_dim: {PATH_DIM}")
-    print(f"fine_n: {FINE_N}")
-    print(f"coarse_stride: {COARSE_STRIDE}")
-    print(f"coarse steps: {len(coarse_ts) - 1}")
-    print(f"benchmark repeats: {BENCHMARK_REPEATS}")
-    print(f"jax platforms: {os.environ['JAX_PLATFORMS']}")
-    print(f"jax default backend: {jax.default_backend()}")
-    print(f"jax devices: {jax.devices()}")
+        y, segment_stats = jax.lax.scan(
+            segment_step,
+            Y0,
+            (polysig_coefficients, polysig_ode_atols),
+        )
+        stats = {key: jnp.sum(value) for key, value in segment_stats.items()}
+        return y, stats
 
-    print()
-    print("preprocessing")
-    print(f"sample driver: {sample_time:.3f}s")
-    print(f"log-ode rough term: {logode_preprocess_time:.3f}s")
-    print(f"loopy driver: {loopy_preprocess_time:.3f}s")
+    solvers = [
+        ("fine WZ", solve_fine_wz, sample_time),
+        ("log-ode", solve_logode, logode_pp),
+        ("loopy ODE", solve_loopy_ode, loopy_pp),
+        ("polysig ODE", solve_polysig_ode, polysig_pp),
+    ]
+    results = {name: benchmark(fn) for name, fn, _ in solvers}
+    y_ref = results["fine WZ"][0]
 
-    print()
-    print("path stats")
-    print(f"fine driver points: {len(ts)}")
-    print(f"fine driver length: {path_length(xs):.6f}")
-    print(f"loopy ODE driver points: {len(loop_ts)}")
-    print(f"loopy ODE driver length: {path_length(loop_xs):.6f}")
-    print(f"max interval signature error: {sig_error:.3e}")
-
-    print()
-    print("terminal values")
-    print(f"fine WZ y(T): {y_wz:.12f}")
-    print(f"log-ode y(T): {y_logode:.12f}")
-    print(f"loopy ODE y(T): {y_loop:.12f}")
-    print(f"log-ode error vs fine WZ: {abs(y_logode - y_wz):.3e}")
-    print(f"loopy ODE error vs fine WZ: {abs(y_loop - y_wz):.3e}")
-    print(f"log-ode vs loopy difference: {abs(y_loop - y_logode):.3e}")
-
-    print()
-    print("timing, compiled solve only")
+    print("\nconfiguration")
+    print(f"  degree={DEGREE}, path_dim={PATH_DIM}, fine_n={FINE_N}")
+    print(f"  coarse_stride={COARSE_STRIDE}, coarse_steps={len(coarse_ts) - 1}")
+    print(f"  benchmark_repeats={BENCHMARK_REPEATS}")
+    print(f"  polysig sig_tol={POLYSIG_SIG_TOL:.1e}, roughness p={ROUGHNESS_P:.3f}")
     print(
-        "fine WZ timing: "
-        f"compile={wz_compile:.3f}s, best={wz_best * 1e3:.3f}ms, "
-        f"mean={wz_mean * 1e3:.3f}ms"
+        f"  polysig ODE rtol/atol={polysig_rtol:.3e} / "
+        f"{np.min(polysig_atols):.3e}..{np.max(polysig_atols):.3e}"
+    )
+    print(f"  jax backend={jax.default_backend()}, devices={jax.devices()}")
+
+    print("\npreprocessing")
+    for name, _, t in solvers:
+        print(f"  {name}: {t:.3f}s")
+
+    print("\npath stats")
+    print(f"  fine driver: {len(ts)} points, length {path_length(xs):.6f}")
+    print(
+        f"  loopy ODE driver: {len(loop_ts)} points, length {path_length(loop_xs):.6f}"
+    )
+    print(f"  max interval signature error: {sig_error:.3e}")
+    print(f"  polysig polynomial degree: {polysig_realisation.polynomial_degree}")
+    print(
+        f"  polysig residual: max={np.max(polysig_realisation.residual_norms):.3e}, "
+        f"mean={np.mean(polysig_realisation.residual_norms):.3e}"
     )
     print(
-        "log-ode timing: "
-        f"compile={logode_compile:.3f}s, best={logode_best * 1e3:.3f}ms, "
-        f"mean={logode_mean * 1e3:.3f}ms"
+        f"  polysig truncation scale: min={np.min(polysig_scales):.3e}, "
+        f"max={np.max(polysig_scales):.3e}"
     )
     print(
-        "loopy ODE timing: "
-        f"compile={loop_compile:.3f}s, best={loop_best * 1e3:.3f}ms, "
-        f"mean={loop_mean * 1e3:.3f}ms"
+        f"  polysig ODE atol: min={np.min(polysig_atols):.3e}, "
+        f"median={np.median(polysig_atols):.3e}, max={np.max(polysig_atols):.3e}"
     )
+    print(
+        f"  polysig intervals converged: "
+        f"{np.count_nonzero(polysig_realisation.converged)}/{len(polysig_realisation.converged)}"
+    )
+
+    print("\nterminal values")
+    for name, _, _ in solvers:
+        y = results[name][0]
+        suffix = (
+            "" if name == "fine WZ" else f"   error vs fine WZ={abs(y - y_ref):.3e}"
+        )
+        print(f"  {name} y(T)={y:.12f}{suffix}")
+
+    print("\ntiming, compiled solve only")
+    for name, _, _ in solvers:
+        _, stats, compile_t, best, mean = results[name]
+        print(
+            f"  {name}: compile={compile_t:.3f}s, best={best * 1e3:.3f}ms, "
+            f"mean={mean * 1e3:.3f}ms, {format_stats(stats)}"
+        )
 
 
 if __name__ == "__main__":
