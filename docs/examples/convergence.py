@@ -16,6 +16,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import diffrax
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import matplotlib
@@ -30,9 +31,8 @@ import matplotlib.pyplot as plt
 jax.config.update("jax_enable_x64", True)
 
 
-def to_numpy_and_clear_cache(x) -> np.ndarray:
+def to_numpy(x) -> np.ndarray:
     out = np.asarray(jax.block_until_ready(x))
-    jax.clear_caches()
     gc.collect()
     return out
 
@@ -50,70 +50,167 @@ def so3_vector_field(y):
     return jnp.eye(3, dtype=y.dtype)
 
 
-def brownian_samples(
-    *, exponent: int, seed: int, t1: float, dim: int
+def brownian_samples_batch(
+    *, exponent: int, seed: int, num_paths: int, t1: float, dim: int
 ) -> tuple[np.ndarray, np.ndarray]:
     n = 2**exponent
     ts = jnp.linspace(0.0, t1, n + 1)
-    brownian = diffrax.VirtualBrownianTree(
-        t0=0.0,
-        t1=t1,
-        tol=t1 / (4 * n),
-        shape=(dim,),
-        key=jax.random.PRNGKey(seed),
+    keys = jnp.stack([jax.random.PRNGKey(seed + i) for i in range(num_paths)])
+
+    @jax.jit
+    def sample_all(keys):
+        def sample_one(key):
+            brownian = diffrax.VirtualBrownianTree(
+                t0=0.0,
+                t1=t1,
+                tol=t1 / (4 * n),
+                shape=(dim,),
+                key=key,
+            )
+            return jax.vmap(lambda t: brownian.evaluate(t))(ts)
+
+        return jax.vmap(sample_one)(keys)
+
+    return np.asarray(ts), to_numpy(sample_all(keys))
+
+
+@jax.jit
+def _solve_fine_wong_zakai_batch(
+    ts: jax.Array, xs_batch: jax.Array, y0: jax.Array
+) -> jax.Array:
+    def solve_one(xs):
+        term = diffrax.ControlTerm(
+            diffrax_vector_field,
+            diffrax.LinearInterpolation(ts=ts, ys=xs),
+        )
+        sol = diffrax.diffeqsolve(
+            term,
+            diffrax.Dopri5(),
+            t0=ts[0],
+            t1=ts[-1],
+            dt0=None,
+            y0=y0,
+            stepsize_controller=diffrax.StepTo(ts),
+            saveat=diffrax.SaveAt(ts=ts),
+            max_steps=ts.shape[0] + 4,
+        )
+        return sol.ys
+
+    return jax.vmap(solve_one)(xs_batch)
+
+
+def solve_fine_wong_zakai_batch(
+    ts: np.ndarray, xs_batch: np.ndarray, y0: float
+) -> np.ndarray:
+    return to_numpy(
+        _solve_fine_wong_zakai_batch(
+            jnp.asarray(ts), jnp.asarray(xs_batch), jnp.asarray(y0)
+        )
     )
-    ys = jax.vmap(lambda t: brownian.evaluate(t))(ts)
-    return np.asarray(ts), np.asarray(ys)
 
 
-def solve_fine_wong_zakai(ts: np.ndarray, xs: np.ndarray, y0: float) -> np.ndarray:
-    ts_jax = jnp.asarray(ts)
-    term = diffrax.ControlTerm(
-        diffrax_vector_field,
-        diffrax.LinearInterpolation(ts=ts_jax, ys=jnp.asarray(xs)),
+@jax.jit
+def _solve_so3_fine_wong_zakai_batch(ts: jax.Array, xs_batch: jax.Array) -> jax.Array:
+    def solve_one(xs):
+        velocities = (xs[1:] - xs[:-1]) / (ts[1:] - ts[:-1])[:, None]
+
+        def coeffs(t, y, args):
+            del y, args
+            index = jnp.searchsorted(ts, t, side="right") - 1
+            index = jnp.clip(index, 0, velocities.shape[0] - 1)
+            return velocities[index]
+
+        sol = diffrax.diffeqsolve(
+            GeometricTerm(coeffs, SO(3)),
+            CFEES25(),
+            t0=ts[0],
+            t1=ts[-1],
+            dt0=None,
+            y0=jnp.eye(3, dtype=xs.dtype),
+            stepsize_controller=diffrax.StepTo(ts),
+            saveat=diffrax.SaveAt(ts=ts),
+            max_steps=ts.shape[0] + 4,
+        )
+        return sol.ys
+
+    return jax.vmap(solve_one)(xs_batch)
+
+
+def solve_so3_fine_wong_zakai_batch(
+    ts: np.ndarray, xs_batch: np.ndarray
+) -> np.ndarray:
+    return to_numpy(
+        _solve_so3_fine_wong_zakai_batch(jnp.asarray(ts), jnp.asarray(xs_batch))
     )
-    sol = diffrax.diffeqsolve(
-        term,
-        diffrax.Dopri5(),
-        t0=float(ts[0]),
-        t1=float(ts[-1]),
-        dt0=None,
-        y0=jnp.asarray(y0),
-        stepsize_controller=diffrax.StepTo(ts_jax),
-        saveat=diffrax.SaveAt(ts=ts_jax),
-        max_steps=len(ts) + 4,
-    )
-    return to_numpy_and_clear_cache(sol.ys)
 
 
-def solve_so3_fine_wong_zakai(ts: np.ndarray, xs: np.ndarray) -> np.ndarray:
-    ts_jax = jnp.asarray(ts)
-    xs_jax = jnp.asarray(xs)
-    velocities = (xs_jax[1:] - xs_jax[:-1]) / (ts_jax[1:] - ts_jax[:-1])[:, None]
-
-    def coeffs(t, y, args):
-        del y, args
-        index = jnp.searchsorted(ts_jax, t, side="right") - 1
-        index = jnp.clip(index, 0, velocities.shape[0] - 1)
-        return velocities[index]
-
-    sol = diffrax.diffeqsolve(
-        GeometricTerm(coeffs, SO(3)),
-        CFEES25(),
-        t0=float(ts[0]),
-        t1=float(ts[-1]),
-        dt0=None,
-        y0=jnp.eye(3),
-        stepsize_controller=diffrax.StepTo(ts_jax),
-        saveat=diffrax.SaveAt(ts=ts_jax),
-        max_steps=len(ts) + 4,
-    )
-    return to_numpy_and_clear_cache(sol.ys)
-
-
-def solve_log_ode(
+def rough_term_template_and_coeffs(
     ts: np.ndarray,
-    xs: np.ndarray,
+    xs_batch: np.ndarray,
+    *,
+    vector_field,
+    geometry,
+    depth: int,
+    coarse_exponent: int,
+    fine_exponent: int,
+    solution: str,
+) -> tuple[jax.Array, RoughTerm, jax.Array]:
+    # RoughTerm builds signatures through NumPy/pysiglib, so only the solve
+    # stage is JAX-vmapped.
+    step = 2 ** (fine_exponent - coarse_exponent)
+    ts_jax = jnp.asarray(ts)
+    coarse_ts = jnp.asarray(ts[::step])
+    template = None
+    coeffs = []
+
+    for xs in xs_batch:
+        driver = diffrax.LinearInterpolation(ts=ts_jax, ys=jnp.asarray(xs))
+        term = RoughTerm(
+            vector_field,
+            driver,
+            geometry,
+            depth=depth,
+            interval_ts=coarse_ts,
+            solution=solution,
+        )
+        if template is None:
+            template = term
+        coeffs.append(np.asarray(term.control.coeffs))
+
+    if template is None:
+        raise ValueError("At least one path is required.")
+    return coarse_ts, template, jnp.asarray(np.stack(coeffs))
+
+
+@eqx.filter_jit
+def solve_rough_from_coeffs_batch(
+    term_template: RoughTerm,
+    coeffs_batch: jax.Array,
+    coarse_ts: jax.Array,
+    y0: jax.Array,
+    inner_solver,
+) -> jax.Array:
+    def solve_one(coeffs):
+        term = eqx.tree_at(lambda term: term.control.coeffs, term_template, coeffs)
+        sol = diffrax.diffeqsolve(
+            term,
+            LogODE(inner_solver),
+            t0=coarse_ts[0],
+            t1=coarse_ts[-1],
+            dt0=None,
+            y0=y0,
+            stepsize_controller=diffrax.StepTo(coarse_ts),
+            saveat=diffrax.SaveAt(ts=coarse_ts),
+            max_steps=coarse_ts.shape[0] + 4,
+        )
+        return sol.ys
+
+    return jax.vmap(solve_one)(coeffs_batch)
+
+
+def solve_log_ode_batch(
+    ts: np.ndarray,
+    xs_batch: np.ndarray,
     *,
     depth: int,
     coarse_exponent: int,
@@ -121,63 +218,55 @@ def solve_log_ode(
     y0: float,
     solution: str,
 ) -> np.ndarray:
-    coarse_ts = jnp.asarray(ts[:: 2 ** (fine_exponent - coarse_exponent)])
-    driver = diffrax.LinearInterpolation(ts=jnp.asarray(ts), ys=jnp.asarray(xs))
-    term = RoughTerm(
-        rough_vector_field,
-        driver,
-        Euclidean(),
+    coarse_ts, template, coeffs_batch = rough_term_template_and_coeffs(
+        ts,
+        xs_batch,
+        vector_field=rough_vector_field,
+        geometry=Euclidean(),
         depth=depth,
-        interval_ts=coarse_ts,
+        coarse_exponent=coarse_exponent,
+        fine_exponent=fine_exponent,
         solution=solution,
     )
-
-    sol = diffrax.diffeqsolve(
-        term,
-        LogODE(diffrax.Tsit5()),
-        t0=float(coarse_ts[0]),
-        t1=float(coarse_ts[-1]),
-        dt0=None,
-        y0=jnp.asarray(y0),
-        stepsize_controller=diffrax.StepTo(coarse_ts),
-        saveat=diffrax.SaveAt(ts=coarse_ts),
-        max_steps=len(coarse_ts) + 4,
+    return to_numpy(
+        solve_rough_from_coeffs_batch(
+            template,
+            coeffs_batch,
+            coarse_ts,
+            jnp.asarray(y0),
+            diffrax.Tsit5(),
+        )
     )
-    return to_numpy_and_clear_cache(sol.ys)
 
 
-def solve_so3_rde(
+def solve_so3_rde_batch(
     ts: np.ndarray,
-    xs: np.ndarray,
+    xs_batch: np.ndarray,
     *,
     depth: int,
     coarse_exponent: int,
     fine_exponent: int,
     solution: str,
 ) -> np.ndarray:
-    coarse_ts = jnp.asarray(ts[:: 2 ** (fine_exponent - coarse_exponent)])
-    driver = diffrax.LinearInterpolation(ts=jnp.asarray(ts), ys=jnp.asarray(xs))
-    term = RoughTerm(
-        so3_vector_field,
-        driver,
-        SO(3),
+    coarse_ts, template, coeffs_batch = rough_term_template_and_coeffs(
+        ts,
+        xs_batch,
+        vector_field=so3_vector_field,
+        geometry=SO(3),
         depth=depth,
-        interval_ts=coarse_ts,
+        coarse_exponent=coarse_exponent,
+        fine_exponent=fine_exponent,
         solution=solution,
     )
-
-    sol = diffrax.diffeqsolve(
-        term,
-        LogODE(CFEES25()),
-        t0=float(coarse_ts[0]),
-        t1=float(coarse_ts[-1]),
-        dt0=None,
-        y0=jnp.eye(3),
-        stepsize_controller=diffrax.StepTo(coarse_ts),
-        saveat=diffrax.SaveAt(ts=coarse_ts),
-        max_steps=len(coarse_ts) + 4,
+    return to_numpy(
+        solve_rough_from_coeffs_batch(
+            template,
+            coeffs_batch,
+            coarse_ts,
+            jnp.eye(3),
+            CFEES25(),
+        )
     )
-    return to_numpy_and_clear_cache(sol.ys)
 
 
 def expected_line(h: np.ndarray, errors: np.ndarray, rate: float) -> np.ndarray:
@@ -258,66 +347,66 @@ def main() -> None:
         depth: np.zeros(len(args.coarse_exponents), dtype=np.float64)
         for depth in (1, 2, 3)
     }
-    for path_index in range(args.num_paths):
-        path_seed = args.seed + path_index
-        print(
-            f"sampling Brownian path {path_index + 1}/{args.num_paths} "
-            f"on {2**args.fine_exponent} fine steps"
-        )
-        ts, xs = brownian_samples(
-            exponent=args.fine_exponent,
-            seed=path_seed,
-            t1=args.t1,
-            dim=2,
-        )
+    print(
+        f"sampling {args.num_paths} Brownian paths on "
+        f"{2**args.fine_exponent} fine steps"
+    )
+    ts, xs_batch = brownian_samples_batch(
+        exponent=args.fine_exponent,
+        seed=args.seed,
+        num_paths=args.num_paths,
+        t1=args.t1,
+        dim=2,
+    )
 
-        print(f"solving fine Wong-Zakai reference for path {path_index + 1}")
-        y_ref = solve_fine_wong_zakai(ts, xs, args.y0)
-        print(f"path {path_index + 1} reference y({args.t1}) = {y_ref[-1]:.8e}")
+    print(f"solving {args.num_paths} fine Wong-Zakai references")
+    y_refs = solve_fine_wong_zakai_batch(ts, xs_batch, args.y0)
+    print(
+        f"reference y({args.t1}) mean = {np.mean(y_refs[:, -1]):.8e}, "
+        f"std = {np.std(y_refs[:, -1]):.8e}"
+    )
 
-        for depth in (1, 2, 3):
-            for i, k in enumerate(args.coarse_exponents):
-                print(
-                    f"solving Log-ODE Stratonovich order {depth} on {2**k} steps "
-                    f"for path {path_index + 1}"
-                )
-                y = solve_log_ode(
-                    ts,
-                    xs,
-                    depth=depth,
-                    coarse_exponent=k,
-                    fine_exponent=args.fine_exponent,
-                    y0=args.y0,
-                    solution="stratonovich",
-                )
-                step = 2 ** (args.fine_exponent - k)
-                stratonovich_errors_by_depth[depth][i] += float(
-                    np.max(np.abs(y - y_ref[::step]))
-                )
+    for depth in (1, 2, 3):
+        for i, k in enumerate(args.coarse_exponents):
+            print(
+                f"solving Log-ODE Stratonovich order {depth} on {2**k} steps "
+                f"for {args.num_paths} paths"
+            )
+            y = solve_log_ode_batch(
+                ts,
+                xs_batch,
+                depth=depth,
+                coarse_exponent=k,
+                fine_exponent=args.fine_exponent,
+                y0=args.y0,
+                solution="stratonovich",
+            )
+            step = 2 ** (args.fine_exponent - k)
+            path_errors = np.max(np.abs(y - y_refs[:, ::step]), axis=1)
+            stratonovich_errors_by_depth[depth][i] = float(np.mean(path_errors))
 
-                print(
-                    f"solving Log-ODE branched Ito order {depth} on {2**k} steps "
-                    f"for path {path_index + 1}"
-                )
-                y = solve_log_ode(
-                    ts,
-                    xs,
-                    depth=depth,
-                    coarse_exponent=k,
-                    fine_exponent=args.fine_exponent,
-                    y0=args.y0,
-                    solution="ito",
-                )
-                ito_errors_by_depth[depth][i] += float(
-                    np.max(np.abs(y - y_ref[::step]))
-                )
+            print(
+                f"solving Log-ODE branched Ito order {depth} on {2**k} steps "
+                f"for {args.num_paths} paths"
+            )
+            y = solve_log_ode_batch(
+                ts,
+                xs_batch,
+                depth=depth,
+                coarse_exponent=k,
+                fine_exponent=args.fine_exponent,
+                y0=args.y0,
+                solution="ito",
+            )
+            path_errors = np.max(np.abs(y - y_refs[:, ::step]), axis=1)
+            ito_errors_by_depth[depth][i] = float(np.mean(path_errors))
 
     mean_stratonovich_errors_by_depth = {
-        depth: np.maximum(errors / args.num_paths, np.finfo(np.float64).tiny)
+        depth: np.maximum(errors, np.finfo(np.float64).tiny)
         for depth, errors in stratonovich_errors_by_depth.items()
     }
     mean_ito_errors_by_depth = {
-        depth: np.maximum(errors / args.num_paths, np.finfo(np.float64).tiny)
+        depth: np.maximum(errors, np.finfo(np.float64).tiny)
         for depth, errors in ito_errors_by_depth.items()
     }
 
@@ -329,65 +418,69 @@ def main() -> None:
         depth: np.zeros(len(args.coarse_exponents), dtype=np.float64)
         for depth in (1, 2, 3)
     }
-    for path_index in range(args.num_paths):
-        path_seed = args.seed + path_index
-        print(
-            f"sampling SO(3) Brownian path {path_index + 1}/{args.num_paths} "
-            f"on {2**args.fine_exponent} fine steps"
-        )
-        ts, xs = brownian_samples(
-            exponent=args.fine_exponent,
-            seed=path_seed,
-            t1=args.t1,
-            dim=3,
-        )
+    print(
+        f"sampling {args.num_paths} SO(3) Brownian paths on "
+        f"{2**args.fine_exponent} fine steps"
+    )
+    ts, xs_batch = brownian_samples_batch(
+        exponent=args.fine_exponent,
+        seed=args.seed,
+        num_paths=args.num_paths,
+        t1=args.t1,
+        dim=3,
+    )
 
-        print(f"solving fine SO(3) Wong-Zakai reference for path {path_index + 1}")
-        y_ref = solve_so3_fine_wong_zakai(ts, xs)
-        print(
-            f"path {path_index + 1} reference det(y({args.t1})) = "
-            f"{np.linalg.det(y_ref[-1]):.8e}"
-        )
+    print(f"solving {args.num_paths} fine SO(3) Wong-Zakai references")
+    y_refs = solve_so3_fine_wong_zakai_batch(ts, xs_batch)
+    dets = np.linalg.det(y_refs[:, -1])
+    print(
+        f"reference det(y({args.t1})) mean = {np.mean(dets):.8e}, "
+        f"std = {np.std(dets):.8e}"
+    )
 
-        for depth in (1, 2, 3):
-            for i, k in enumerate(args.coarse_exponents):
-                print(
-                    f"solving SO(3) RDE Stratonovich order {depth} on {2**k} steps "
-                    f"for path {path_index + 1}"
-                )
-                y = solve_so3_rde(
-                    ts,
-                    xs,
-                    depth=depth,
-                    coarse_exponent=k,
-                    fine_exponent=args.fine_exponent,
-                    solution="stratonovich",
-                )
-                step = 2 ** (args.fine_exponent - k)
-                path_error = np.linalg.norm(y - y_ref[::step], axis=(-2, -1))
-                so3_stratonovich_errors_by_depth[depth][i] += float(np.max(path_error))
+    for depth in (1, 2, 3):
+        for i, k in enumerate(args.coarse_exponents):
+            print(
+                f"solving SO(3) RDE Stratonovich order {depth} on {2**k} steps "
+                f"for {args.num_paths} paths"
+            )
+            y = solve_so3_rde_batch(
+                ts,
+                xs_batch,
+                depth=depth,
+                coarse_exponent=k,
+                fine_exponent=args.fine_exponent,
+                solution="stratonovich",
+            )
+            step = 2 ** (args.fine_exponent - k)
+            path_errors = np.linalg.norm(y - y_refs[:, ::step], axis=(-2, -1))
+            so3_stratonovich_errors_by_depth[depth][i] = float(
+                np.mean(np.max(path_errors, axis=1))
+            )
 
-                print(
-                    f"solving SO(3) RDE planar branched Ito order {depth} "
-                    f"on {2**k} steps for path {path_index + 1}"
-                )
-                y = solve_so3_rde(
-                    ts,
-                    xs,
-                    depth=depth,
-                    coarse_exponent=k,
-                    fine_exponent=args.fine_exponent,
-                    solution="ito",
-                )
-                path_error = np.linalg.norm(y - y_ref[::step], axis=(-2, -1))
-                so3_ito_errors_by_depth[depth][i] += float(np.max(path_error))
+            print(
+                f"solving SO(3) RDE planar branched Ito order {depth} "
+                f"on {2**k} steps for {args.num_paths} paths"
+            )
+            y = solve_so3_rde_batch(
+                ts,
+                xs_batch,
+                depth=depth,
+                coarse_exponent=k,
+                fine_exponent=args.fine_exponent,
+                solution="ito",
+            )
+            path_errors = np.linalg.norm(y - y_refs[:, ::step], axis=(-2, -1))
+            so3_ito_errors_by_depth[depth][i] = float(
+                np.mean(np.max(path_errors, axis=1))
+            )
 
     mean_so3_stratonovich_errors_by_depth = {
-        depth: np.maximum(errors / args.num_paths, np.finfo(np.float64).tiny)
+        depth: np.maximum(errors, np.finfo(np.float64).tiny)
         for depth, errors in so3_stratonovich_errors_by_depth.items()
     }
     mean_so3_ito_errors_by_depth = {
-        depth: np.maximum(errors / args.num_paths, np.finfo(np.float64).tiny)
+        depth: np.maximum(errors, np.finfo(np.float64).tiny)
         for depth, errors in so3_ito_errors_by_depth.items()
     }
     plot_convergence(

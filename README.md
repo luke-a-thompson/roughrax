@@ -71,6 +71,55 @@ sol = diffrax.diffeqsolve(
 )
 ```
 
+## Geometric usage
+
+For manifold-valued equations, pass the target geometry to `RoughTerm` and wrap a geometric base solver with `LogODE`. The vector field should return the stacked driving fields in the coordinates expected by the manifold.
+
+```python
+import diffrax
+import jax.numpy as jnp
+from georax import CFEES25, SO
+from roughrax import LogODE, RoughTerm
+
+
+def so3_vector_field(y):
+    del y
+    return jnp.eye(3)
+
+
+fine_ts = jnp.linspace(0.0, 1.0, 257)
+fine_xs = jnp.stack(
+    [
+        0.2 * jnp.sin(3 * fine_ts),
+        0.3 * jnp.cos(2 * fine_ts),
+        0.1 * fine_ts,
+    ],
+    axis=-1,
+)
+driver = diffrax.LinearInterpolation(ts=fine_ts, ys=fine_xs)
+coarse_ts = fine_ts[::32]
+
+term = RoughTerm(
+    so3_vector_field,
+    driver,
+    SO(3),
+    depth=3,
+    interval_ts=coarse_ts,
+    solution="stratonovich",
+)
+
+sol = diffrax.diffeqsolve(
+    term,
+    LogODE(CFEES25()),
+    t0=float(coarse_ts[0]),
+    t1=float(coarse_ts[-1]),
+    dt0=None,
+    y0=jnp.eye(3),
+    stepsize_controller=diffrax.StepTo(coarse_ts),
+    saveat=diffrax.SaveAt(ts=coarse_ts),
+)
+```
+
 ## Install
 
 ```bash

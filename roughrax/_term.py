@@ -48,14 +48,14 @@ class RoughTerm(AbstractTerm[Array, Array]):
     vector_field: VectorField = eqx.field(static=True)
     control: AbstractPath
     basis: PrimitiveBasis = eqx.field(static=True)
-    geometry: Manifold[Any]
     lifted_fields: tuple[LiftedField, ...] = eqx.field(static=True)
+    geometry: Manifold[Any] = Euclidean()
 
     def __init__(
         self,
         vector_field: VectorField,
         control: AbstractPath,
-        geometry: Manifold[Any] | None = None,
+        geometry: Manifold[Any] = Euclidean(),
         *,
         depth: int,
         interval_ts: Array | None = None,
@@ -69,22 +69,16 @@ class RoughTerm(AbstractTerm[Array, Array]):
                 "LinearInterpolation-like path with `.ts` and `.ys`."
             )
 
-        geometry = Euclidean() if geometry is None else geometry
         ts_np = np.asarray(ts)
-        ys_np = np.array(ys, copy=True, order="C")
+        ys_np = np.ascontiguousarray(ys)
         dim = int(ys_np.shape[-1])
-        non_euclidean = not isinstance(geometry, Euclidean)
 
         interval_ts_np = ts_np if interval_ts is None else np.asarray(interval_ts)
         indices = np.searchsorted(ts_np, interval_ts_np)
-        slices = [
-            np.array(ys_np[indices[j] : indices[j + 1] + 1], copy=True, order="C")
-            for j in range(len(indices) - 1)
-        ]
 
         match solution:
             case "ito":
-                planar = non_euclidean
+                planar = not isinstance(geometry, Euclidean)
                 primitive_basis = (
                     make_planar_tree_basis(depth, dim)
                     if planar
@@ -92,15 +86,21 @@ class RoughTerm(AbstractTerm[Array, Array]):
                 )
                 pysiglib.prepare_branched_sig(dim, depth, planar=planar)
                 coeffs = [
-                    pysiglib.branched_sig(
-                        s, depth, tree_order="canonical", planar=planar
+                    pysiglib.branched_log_sig(
+                        ys_np[indices[j] : indices[j + 1] + 1],
+                        depth,
+                        tree_order="canonical",
+                        planar=planar,
                     )
-                    for s in slices
+                    for j in range(len(indices) - 1)
                 ]
             case "stratonovich":
                 primitive_basis = make_lyndon_basis(depth, dim)
                 pysiglib.prepare_log_sig(dim, depth, 1)
-                coeffs = [pysiglib.log_sig(s, depth) for s in slices]
+                coeffs = [
+                    pysiglib.log_sig(ys_np[indices[j] : indices[j + 1] + 1], depth)
+                    for j in range(len(indices) - 1)
+                ]
             case _:
                 raise ValueError(f"Unknown solution type {solution!r}.")
 
