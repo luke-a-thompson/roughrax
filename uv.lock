@@ -1147,6 +1147,15 @@ wheels = [
 ]
 
 [[package]]
+name = "py-cpuinfo"
+version = "9.0.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/37/a8/d832f7293ebb21690860d2e01d8115e5ff6f2ae8bbdc953f0eb0fa4bd2c7/py-cpuinfo-9.0.0.tar.gz", hash = "sha256:3cdbbf3fac90dc6f118bfd64384f309edeadd902d7c8fb17f02ffa1fc3f49690", size = 104716, upload-time = "2022-10-25T20:38:06.303Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e0/a9/023730ba63db1e494a271cb018dcd361bd2c917ba7004c3e49d5daf795a2/py_cpuinfo-9.0.0-py3-none-any.whl", hash = "sha256:859625bc251f64e21f077d099d4162689c762b5d6a4c3c97553d56241c9674d5", size = 22335, upload-time = "2022-10-25T20:38:27.636Z" },
+]
+
+[[package]]
 name = "pygments"
 version = "2.20.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1166,35 +1175,32 @@ wheels = [
 
 [[package]]
 name = "pysiglib"
-version = "3.0.3"
-source = { registry = "https://pypi.org/simple" }
+source = { directory = "/home/luke/pySigLibax" }
 dependencies = [
     { name = "kauri" },
     { name = "numpy" },
     { name = "torch" },
 ]
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/2c/f6/75436bf0cd625de8bd34e027af2381534145d31dd952e22a822429363a42/pysiglib-3.0.3-py3-none-macosx_11_0_arm64.whl", hash = "sha256:2c35a476995222c7731383235d7f80835231b27ebb96a2a17c072d0069d4a917", size = 494239, upload-time = "2026-05-16T09:51:51.559Z" },
-    { url = "https://files.pythonhosted.org/packages/3c/47/c6093b017a9e47acad027f97d5510758ca7a0f165b7f625f54b809a1233a/pysiglib-3.0.3-py3-none-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:2f96ad02f958ec2d7b00bff4096bb8a283b8e61adeb816a7fd1c322b82b5bb64", size = 790727, upload-time = "2026-05-16T09:51:53.265Z" },
-    { url = "https://files.pythonhosted.org/packages/66/d4/6926ae17c67a57615602bd0e34f61ce55e249c2e074f77e0fc1d8f3835f7/pysiglib-3.0.3-py3-none-win_amd64.whl", hash = "sha256:51b65c25e491605214ecc586e200029f2eefe6eec3e55edf0317d3d807e39bf2", size = 743756, upload-time = "2026-05-16T09:51:55.021Z" },
-]
 
-[package.optional-dependencies]
-cuda = [
-    { name = "pysiglib-cuda" },
+[package.metadata]
+requires-dist = [
+    { name = "jax", marker = "extra == 'jax'", specifier = ">=0.9.1" },
+    { name = "kauri", specifier = ">=2.1.1" },
+    { name = "numpy" },
+    { name = "pysiglib-cuda", marker = "extra == 'cuda'", specifier = "==3.0.3" },
+    { name = "torch" },
 ]
+provides-extras = ["cuda", "jax"]
 
 [[package]]
 name = "pysiglib-cuda"
-version = "3.0.3"
-source = { registry = "https://pypi.org/simple" }
+source = { directory = "/home/luke/pySigLibax/plugins/cuda" }
 dependencies = [
     { name = "pysiglib" },
 ]
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/78/ac/b3867ea5a574b3ceda12635597c1009b700798a0fbd9fd1d3ea573e3bc56/pysiglib_cuda-3.0.3-py3-none-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:d30feac0e82d91e18684809f5146af0b88e01bbb73bca0fcde91f5f356c62607", size = 42750857, upload-time = "2026-05-16T09:52:17.124Z" },
-    { url = "https://files.pythonhosted.org/packages/07/f8/ac46f837df1be5a2485416a5be1f5808aae3bdbbbf70458ecdb7b5216d85/pysiglib_cuda-3.0.3-py3-none-win_amd64.whl", hash = "sha256:47b8795dd977277bc799e2d0a757aa0ff19ca3a33b3c04dc1650ef36db252343", size = 42689226, upload-time = "2026-05-16T09:52:23.25Z" },
-]
+
+[package.metadata]
+requires-dist = [{ name = "pysiglib", specifier = "==3.0.3" }]
 
 [[package]]
 name = "pytest"
@@ -1210,6 +1216,19 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/7d/0d/549bd94f1a0a402dc8cf64563a117c0f3765662e2e668477624baeec44d5/pytest-9.0.3.tar.gz", hash = "sha256:b86ada508af81d19edeb213c681b1d48246c1a91d304c6c81a427674c17eb91c", size = 1572165, upload-time = "2026-04-07T17:16:18.027Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/d4/24/a372aaf5c9b7208e7112038812994107bc65a84cd00e0354a88c2c77a617/pytest-9.0.3-py3-none-any.whl", hash = "sha256:2c5efc453d45394fdd706ade797c0a81091eccd1d6e4bccfcd476e2b8e0ab5d9", size = 375249, upload-time = "2026-04-07T17:16:16.13Z" },
+]
+
+[[package]]
+name = "pytest-benchmark"
+version = "5.2.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "py-cpuinfo" },
+    { name = "pytest" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/24/34/9f732b76456d64faffbef6232f1f9dbec7a7c4999ff46282fa418bd1af66/pytest_benchmark-5.2.3.tar.gz", hash = "sha256:deb7317998a23c650fd4ff76e1230066a76cb45dcece0aca5607143c619e7779", size = 341340, upload-time = "2025-11-09T18:48:43.215Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/33/29/e756e715a48959f1c0045342088d7ca9762a2f509b945f362a316e9412b7/pytest_benchmark-5.2.3-py3-none-any.whl", hash = "sha256:bc839726ad20e99aaa0d11a127445457b4219bdb9e80a1afc4b51da7f96b0803", size = 45255, upload-time = "2025-11-09T18:48:39.765Z" },
 ]
 
 [[package]]
@@ -1230,30 +1249,38 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "diffrax" },
+    { name = "equinox" },
     { name = "georax" },
     { name = "jax", extra = ["cuda"] },
-    { name = "pysiglib", extra = ["cuda"] },
+    { name = "jaxtyping" },
+    { name = "numpy" },
+    { name = "pysiglib" },
+    { name = "pysiglib-cuda" },
 ]
 
 [package.optional-dependencies]
 dev = [
-    { name = "diffrax-lowstorage" },
     { name = "fbm" },
     { name = "matplotlib" },
     { name = "pytest" },
+    { name = "pytest-benchmark" },
     { name = "tqdm" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "diffrax", specifier = ">=0.7.1" },
-    { name = "diffrax-lowstorage", marker = "extra == 'dev'", git = "https://github.com/luke-a-thompson/diffrax-lowstorage.git" },
+    { name = "equinox", specifier = ">=0.13.0" },
     { name = "fbm", marker = "extra == 'dev'", specifier = ">=0.3.0" },
     { name = "georax", git = "https://github.com/luke-a-thompson/georax.git" },
     { name = "jax", extras = ["cuda"], specifier = ">=0.9.1" },
+    { name = "jaxtyping", specifier = ">=0.3.0" },
     { name = "matplotlib", marker = "extra == 'dev'", specifier = ">=3.10.8" },
-    { name = "pysiglib", extras = ["cuda"], specifier = ">=3.0.1" },
+    { name = "numpy", specifier = ">=2.0" },
+    { name = "pysiglib", directory = "/home/luke/pySigLibax" },
+    { name = "pysiglib-cuda", directory = "/home/luke/pySigLibax/plugins/cuda" },
     { name = "pytest", marker = "extra == 'dev'" },
+    { name = "pytest-benchmark", marker = "extra == 'dev'", specifier = ">=5.2.3" },
     { name = "tqdm", marker = "extra == 'dev'" },
 ]
 provides-extras = ["dev"]

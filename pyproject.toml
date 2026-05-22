@@ -1,32 +1,70 @@
 [build-system]
-requires = ["uv_build>=0.10.9,<0.11.0"]
+requires = ["uv_build>=0.10.9,<0.12.0"]
 build-backend = "uv_build"
 
 [project]
 name = "roughrax"
 version = "0.1.0"
-description = "Add your description here"
+description = "Rough differential equation integrators for Diffrax and Georax"
 readme = "README.md"
 requires-python = ">=3.12"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Luke Thompson", email = "luke.thompson@sydney.edu.au" },
+]
+keywords = [
+    "differential equations",
+    "diffrax",
+    "geometric integration",
+    "jax",
+    "log-ode",
+    "numerical analysis",
+    "ordinary differential equations",
+    "rough differential equations",
+    "rough paths",
+    "scientific computing",
+    "signatures",
+    "stochastic differential equations",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Natural Language :: English",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Scientific/Engineering :: Mathematics",
+]
 dependencies = [
     "diffrax>=0.7.1",
+    "equinox>=0.13.0",
+    "georax>=0.1.0",
     "jax[cuda]>=0.9.1",
+    "jaxtyping>=0.3.0",
+    "numpy>=2.0",
     "pysiglib>=3.0.3",
     "pysiglib-cuda>=3.0.3",
-    "georax",
 ]
 
+[project.urls]
+Homepage = "https://github.com/luke-a-thompson/roughrax"
+Repository = "https://github.com/luke-a-thompson/roughrax"
+Issues = "https://github.com/luke-a-thompson/roughrax/issues"
+
 [tool.uv.sources]
-diffrax-lowstorage = {git = "https://github.com/luke-a-thompson/diffrax-lowstorage.git"}
-georax = {git = "https://github.com/luke-a-thompson/georax.git"}
-pysiglib = {path = "/home/luke/pySigLibax"}
-pysiglib-cuda = {path = "/home/luke/pySigLibax/plugins/cuda"}
+georax = { git = "https://github.com/luke-a-thompson/georax.git" }
+pysiglib = { path = "/home/luke/pySigLibax" }
+pysiglib-cuda = { path = "/home/luke/pySigLibax/plugins/cuda" }
 
 [project.optional-dependencies]
 dev = [
     "pytest",
     "fbm>=0.3.0",
-    "diffrax-lowstorage",
     "matplotlib>=3.10.8",
     "tqdm",
     "pytest-benchmark>=5.2.3",

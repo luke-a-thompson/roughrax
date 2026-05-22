@@ -12,7 +12,26 @@ from roughrax._term import RoughTerm, unwrap_rough_term
 
 
 class LogODE(AbstractSolver[None]):
-    """Log-ODE solver for a ``RoughTerm`` with primitive log coefficients."""
+    r"""Log-ODE solver for a ``RoughTerm`` with primitive log coefficients.
+
+    ??? Reference
+
+        ```bibtex
+        @article{castell1996ordinary,
+            author={Castell, Fabienne and Gaines, Jessica},
+            title={The ordinary differential equation approach to asymptotically efficient
+                   schemes for solution of stochastic differential equations},
+            journal={Annales de l'I.H.P. Probabilit{'e}s et statistiques},
+            pages={231--250},
+            year={1996},
+            publisher={Gauthier-Villars},
+            volume={32},
+            number={2},
+            mrnumber={1386220},
+            zbl={0851.60054},
+            url={https://www.numdam.org/item/AIHPB_1996__32_2_231_0/},
+        }
+    """
 
     term_structure = RoughTerm
     interpolation_cls = LocalLinearInterpolation
@@ -55,6 +74,3 @@ class LogODE(AbstractSolver[None]):
 
     def func(self, terms, t0, y0, args):
         return terms.vf(t0, y0, args)
-
-
-__all__ = ["LogODE"]
