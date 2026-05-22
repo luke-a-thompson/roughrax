@@ -8,7 +8,7 @@
 
 <h2 align='center'>Rough Differential Equation integrators for Diffrax and Georax.</h2>
 
-Roughrax enables the solving of rough differential equations natively in Diffrax via the log-ODE method. Leveraging [PySigLib](https://github.com/daniil-shmelev/pySigLib) for signatures, Roughrax supports Stratonovich and Itô integration over Euclidean spaces, with support for homogeneous spaces provided by [Georax](https://github.com/luke-a-thompson/georax).
+Roughrax enables the solving of rough differential equations natively in [Diffrax](https://github.com/patrick-kidger/diffrax) via the log-ODE method. Leveraging [PySigLib](https://github.com/daniil-shmelev/pySigLib) for signatures, Roughrax supports Stratonovich and Itô integration over Euclidean spaces, with support for homogeneous spaces provided by [Georax](https://github.com/luke-a-thompson/georax).
 
 ## LogODE
 
