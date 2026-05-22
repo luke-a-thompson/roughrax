@@ -11,13 +11,13 @@ requires-python = ">=3.12"
 dependencies = [
     "diffrax>=0.7.1",
     "jax[cuda]>=0.9.1",
-    "pysiglib>=3.0.1",
-    "pysiglib-cuda>=3.0.1",
+    "pysiglib>=3.0.3",
+    "pysiglib-cuda>=3.0.3",
     "georax",
 ]
 
 [tool.uv.sources]
-diffrax-lowstorage = {git = "https://github.com/luke-a-thompson/diffrax-lowstorage.git", rev = "6bca580732583a492742bc39dc4b65072c8427bf"}
+diffrax-lowstorage = {git = "https://github.com/luke-a-thompson/diffrax-lowstorage.git"}
 georax = {git = "https://github.com/luke-a-thompson/georax.git"}
 pysiglib = {path = "/home/luke/pySigLibax"}
 pysiglib-cuda = {path = "/home/luke/pySigLibax/plugins/cuda"}

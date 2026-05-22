@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg id="Layer_1" xmlns="http://www.w3.org/2000/svg" version="1.1" viewBox="0 0 260 80">
+  <!-- Generator: Adobe Illustrator 30.4.0, SVG Export Plug-In . SVG Version: 2.1.4 Build 226)  -->
+  <defs>
+    <style>
+      .st0 {
+        fill: #171612;
+        font-family: Georgia-Italic, Georgia;
+        font-size: 44px;
+        font-style: italic;
+        isolation: isolate;
+        letter-spacing: 0em;
+      }
+
+      .st1 {
+        fill: none;
+        stroke: #f15a22;
+        stroke-miterlimit: 10;
+        stroke-width: .75px;
+      }
+    </style>
+  </defs>
+  <text class="st0" transform="translate(20 50)"><tspan x="0" y="0">roughrax</tspan></text>
+  <polyline class="st1" points="21.67 66.42 30.82 60.42 38.13 71.42 45.45 62.42 54.6 72.42 61.91 61.42 71.06 70.42 78.38 60.42 87.52 71.42 94.84 63.42 103.98 72.42 111.3 61.42 120.45 70.42 127.76 60.42 136.91 71.42 144.23 63.42 153.37 69.42 160.69 61.42 169.83 71.42 177.15 62.42 186.3 70.42 195.44 61.42 204.59 66.42"/>
+</svg>

@@ -1,6 +1,12 @@
-# roughrax
+<p align="center">
+  <picture>
+    <source srcset="https://raw.githubusercontent.com/luke-a-thompson/roughrax/main/docs/_static/roughrax.dark.svg" media="(prefers-color-scheme: dark)">
+    <source srcset="https://raw.githubusercontent.com/luke-a-thompson/roughrax/main/docs/_static/roughrax.light.svg" media="(prefers-color-scheme: light)">
+    <img src="https://raw.githubusercontent.com/luke-a-thompson/roughrax/main/docs/_static/roughrax.light.svg" width="350" alt="Logo">
+  </picture>
+</p>
 
-Rough Differential Equation integrators for [Diffrax](https://github.com/patrick-kidger/diffrax), built on top of [georax](https://github.com/luke-a-thompson/georax) for geometric integration on manifolds.
+<h2 align='center'>Rough Differential Equation integrators for [Diffrax](https://github.com/patrick-kidger/diffrax), built on top of [georax](https://github.com/luke-a-thompson/georax) for geometric integration on manifolds.</h2>
 
 ## LogODE
 
