@@ -43,7 +43,7 @@ Roughrax enables the solving of rough differential equations natively in [Diffra
 import diffrax
 import jax.numpy as jnp
 from georax import Euclidean
-from roughrax import LogODE, RoughTerm
+from roughrax import LogODE, RoughTerm, SignatureInterpolation
 
 # Vector field returns the stacked driving fields f_1, ..., f_d at y.
 def vector_field(y):
@@ -57,13 +57,16 @@ driver = diffrax.LinearInterpolation(ts=fine_ts, ys=fine_xs)
 # Coarse grid the solver steps on; one log-signature is computed per interval.
 coarse_ts = fine_ts[::32]
 
+control = SignatureInterpolation(
+    driver,
+    coarse_ts,
+    depth=3,
+    solution="stratonovich",
+)
 term = RoughTerm(
     vector_field,
-    driver,
+    control,
     Euclidean(),
-    depth=3,
-    interval_ts=coarse_ts,
-    solution="stratonovich",
 )
 
 # Then solve with a Log-ODE step driving the wrapped Diffrax solver.
@@ -87,7 +90,7 @@ For manifold-valued equations, pass the target geometry to `RoughTerm` and wrap 
 import diffrax
 import jax.numpy as jnp
 from georax import CFEES25, SO
-from roughrax import LogODE, RoughTerm
+from roughrax import LogODE, RoughTerm, SignatureInterpolation
 
 
 def so3_vector_field(y):
@@ -107,13 +110,16 @@ fine_xs = jnp.stack(
 driver = diffrax.LinearInterpolation(ts=fine_ts, ys=fine_xs)
 coarse_ts = fine_ts[::32]
 
+control = SignatureInterpolation(
+    driver,
+    coarse_ts,
+    depth=3,
+    solution="stratonovich",
+)
 term = RoughTerm(
     so3_vector_field,
-    driver,
+    control,
     SO(3),
-    depth=3,
-    interval_ts=coarse_ts,
-    solution="stratonovich",
 )
 
 sol = diffrax.diffeqsolve(
