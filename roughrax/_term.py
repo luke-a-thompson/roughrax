@@ -136,7 +136,7 @@ class RoughTerm(AbstractTerm[Array, Array]):
     """Diffrax term over internally lifted rough-path coefficients."""
 
     vector_field: VectorField = eqx.field(static=True)
-    control: AbstractPath
+    control: SignatureInterpolation
     basis: PrimitiveBasis = eqx.field(static=True)
     lifted_fields: tuple[LiftedField, ...] = eqx.field(static=True)
     geometry: Manifold[Any] = Euclidean()
