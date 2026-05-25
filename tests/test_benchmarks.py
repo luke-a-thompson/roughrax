@@ -20,7 +20,10 @@ from roughrax._bases import (
     make_planar_tree_basis,
     make_tree_basis,
 )
-from roughrax._pseudo_bialgebra_map import form_pseudo_bialgebra_map
+from roughrax._pseudo_bialgebra_map import (
+    form_pseudo_bialgebra_evaluator,
+    form_pseudo_bialgebra_map,
+)
 
 
 @dataclass(frozen=True)
@@ -35,12 +38,38 @@ class BenchmarkCase:
     ys: np.ndarray
 
 
+@dataclass(frozen=True)
+class PseudoBialgebraEvalCase:
+    name: str
+    basis: PrimitiveBasis
+    geometry: Manifold
+    vector_field: Callable
+    y: np.ndarray
+
+
 def rough_vector_field(y):
     return jnp.stack([jnp.cos(y), jnp.sin(y)])
 
 
 def so3_vector_field(y):
     return jnp.eye(3, dtype=y.dtype)
+
+
+def sizeable_vector_field(y):
+    dtype = y.dtype
+    n = y.shape[0]
+    rows = jnp.arange(1, 5, dtype=dtype)[:, None]
+    cols = jnp.arange(1, n + 1, dtype=dtype)[None, :]
+    phases = rows * cols / n
+    mixed = jnp.tanh(jnp.sum(jnp.sin(y[None, :] + phases), axis=-1))
+    return jnp.stack(
+        [
+            jnp.sin(y + mixed[0]) + 0.10 * y**2,
+            jnp.cos(1.3 * y - mixed[1]) + 0.05 * jnp.sin(y) * y,
+            jnp.tanh(y + mixed[2]) + 0.03 * jnp.cos(2.0 * y),
+            jnp.sin(y * y + mixed[3]) - 0.02 * y,
+        ]
+    )
 
 
 def brownian_like_path(*, dim: int, num_steps: int, seed: int) -> np.ndarray:
@@ -118,6 +147,30 @@ CASES = [
             seed=1,
         ),
         id="so3-ito",
+    ),
+]
+
+
+PSEUDO_BIALGEBRA_EVAL_CASES = [
+    pytest.param(
+        PseudoBialgebraEvalCase(
+            name="lyndon-dim4-depth4-state64",
+            basis=make_lyndon_basis(4, 4),
+            geometry=Euclidean(),
+            vector_field=sizeable_vector_field,
+            y=np.linspace(-0.5, 0.5, 64),
+        ),
+        id="lyndon-dim4-depth4-state64",
+    ),
+    pytest.param(
+        PseudoBialgebraEvalCase(
+            name="tree-dim4-depth3-state64",
+            basis=make_tree_basis(3, 4),
+            geometry=Euclidean(),
+            vector_field=sizeable_vector_field,
+            y=np.linspace(-0.5, 0.5, 64),
+        ),
+        id="tree-dim4-depth3-state64",
     ),
 ]
 
@@ -204,6 +257,24 @@ def evaluation_state(case: BenchmarkCase):
 def evaluate_lifted_fields(lifted_fields, y):
     values = jnp.stack([field(y) for field in lifted_fields])
     return jax.block_until_ready(values)
+
+
+@eqx.filter_jit
+def _evaluate_lifted_fields_old(lifted_fields, y):
+    return jnp.stack([field(y) for field in lifted_fields])
+
+
+def evaluate_lifted_fields_old(lifted_fields, y):
+    return jax.block_until_ready(_evaluate_lifted_fields_old(lifted_fields, y))
+
+
+@eqx.filter_jit
+def _evaluate_lifted_fields_new(evaluator, y):
+    return evaluator(y)
+
+
+def evaluate_lifted_fields_new(evaluator, y):
+    return jax.block_until_ready(_evaluate_lifted_fields_new(evaluator, y))
 
 
 def make_rough_term_coeffs(case: BenchmarkCase):
@@ -312,6 +383,30 @@ def test_benchmark_pseudo_bialgebra_map_eval(benchmark, case: BenchmarkCase):
     evaluate_lifted_fields(lifted_fields, y)
     values = benchmark(evaluate_lifted_fields, lifted_fields, y)
     assert values.shape[0] == len(basis.keys)
+
+
+@pytest.mark.benchmark(group="pseudo-bialgebra-map-eval-old-vs-new")
+@pytest.mark.parametrize("case", PSEUDO_BIALGEBRA_EVAL_CASES)
+@pytest.mark.parametrize("implementation", ["old", "new"])
+def test_benchmark_pseudo_bialgebra_map_eval_old_vs_new(
+    benchmark, case: PseudoBialgebraEvalCase, implementation: str
+):
+    y = jnp.asarray(case.y)
+    if implementation == "old":
+        lifted_fields = form_pseudo_bialgebra_map(
+            case.vector_field, case.basis, case.geometry
+        )
+        evaluate_lifted_fields_old(lifted_fields, y)
+        values = benchmark(evaluate_lifted_fields_old, lifted_fields, y)
+    else:
+        evaluator = form_pseudo_bialgebra_evaluator(
+            case.vector_field, case.basis, case.geometry
+        )
+        evaluate_lifted_fields_new(evaluator, y)
+        values = benchmark(evaluate_lifted_fields_new, evaluator, y)
+
+    assert values.shape[0] == len(case.basis.keys)
+    assert values.shape[1:] == y.shape
 
 
 @pytest.mark.benchmark(group="log-ode")

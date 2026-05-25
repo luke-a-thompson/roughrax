@@ -18,7 +18,9 @@ from roughrax._bases import (
 )
 from roughrax._pseudo_bialgebra_map import (
     LiftedField,
+    StackedLiftedField,
     VectorField,
+    form_pseudo_bialgebra_evaluator,
     form_pseudo_bialgebra_map,
 )
 
@@ -139,6 +141,7 @@ class RoughTerm(AbstractTerm[Array, Array]):
     control: SignatureInterpolation
     basis: PrimitiveBasis = eqx.field(static=True)
     lifted_fields: tuple[LiftedField, ...] = eqx.field(static=True)
+    lifted_field_evaluator: StackedLiftedField = eqx.field(static=True)
     geometry: Manifold[Any] = Euclidean()
 
     def __init__(
@@ -159,10 +162,13 @@ class RoughTerm(AbstractTerm[Array, Array]):
         self.lifted_fields = form_pseudo_bialgebra_map(
             vector_field, control.basis, geometry
         )
+        self.lifted_field_evaluator = form_pseudo_bialgebra_evaluator(
+            vector_field, control.basis, geometry
+        )
 
     def vf(self, t, y, args):
         del t, args
-        return jnp.stack([field(y) for field in self.lifted_fields])
+        return self.lifted_field_evaluator(y)
 
     def contr(self, t0, t1, **kwargs):
         return self.control.evaluate(t0, t1, **kwargs)
