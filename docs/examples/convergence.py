@@ -1,5 +1,7 @@
 """Log-ODE and SO(3) RDE convergence against fine Wong-Zakai references."""
 
+# ruff: noqa: E402
+
 from __future__ import annotations
 
 import argparse
@@ -23,7 +25,7 @@ import matplotlib
 import numpy as np
 from georax import CFEES25, Euclidean, GeometricTerm, SO
 
-from roughrax import LogODE, RoughTerm
+from roughrax import LogODE, RoughTerm, SignatureInterpolation
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -136,9 +138,7 @@ def _solve_so3_fine_wong_zakai_batch(ts: jax.Array, xs_batch: jax.Array) -> jax.
     return jax.vmap(solve_one)(xs_batch)
 
 
-def solve_so3_fine_wong_zakai_batch(
-    ts: np.ndarray, xs_batch: np.ndarray
-) -> np.ndarray:
+def solve_so3_fine_wong_zakai_batch(ts: np.ndarray, xs_batch: np.ndarray) -> np.ndarray:
     return to_numpy(
         _solve_so3_fine_wong_zakai_batch(jnp.asarray(ts), jnp.asarray(xs_batch))
     )
@@ -155,8 +155,6 @@ def rough_term_template_and_coeffs(
     fine_exponent: int,
     solution: str,
 ) -> tuple[jax.Array, RoughTerm, jax.Array]:
-    # RoughTerm builds signatures through NumPy/pysiglib, so only the solve
-    # stage is JAX-vmapped.
     step = 2 ** (fine_exponent - coarse_exponent)
     ts_jax = jnp.asarray(ts)
     coarse_ts = jnp.asarray(ts[::step])
@@ -165,13 +163,16 @@ def rough_term_template_and_coeffs(
 
     for xs in xs_batch:
         driver = diffrax.LinearInterpolation(ts=ts_jax, ys=jnp.asarray(xs))
+        control = SignatureInterpolation(
+            driver,
+            coarse_ts,
+            depth,
+            solution,
+        )
         term = RoughTerm(
             vector_field,
-            driver,
+            control,
             geometry,
-            depth=depth,
-            interval_ts=coarse_ts,
-            solution=solution,
         )
         if template is None:
             template = term

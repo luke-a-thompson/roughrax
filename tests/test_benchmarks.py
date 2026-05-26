@@ -43,6 +43,16 @@ def so3_vector_field(y):
     return jnp.eye(3, dtype=y.dtype)
 
 
+def so3_state_dependent_vector_field(y):
+    return jnp.stack(
+        [
+            jnp.stack([1.0 + 0.1 * y[0, 0], 0.05 * y[1, 0], 0.03 * y[2, 0]]),
+            jnp.stack([0.04 * y[0, 1], 1.0 + 0.1 * y[1, 1], 0.05 * y[2, 1]]),
+            jnp.stack([0.03 * y[0, 2], 0.04 * y[1, 2], 1.0 + 0.1 * y[2, 2]]),
+        ]
+    ).astype(y.dtype)
+
+
 def brownian_like_path(*, dim: int, num_steps: int, seed: int) -> np.ndarray:
     rng = np.random.default_rng(seed)
     dt = 1.0 / num_steps
@@ -118,6 +128,28 @@ CASES = [
             seed=1,
         ),
         id="so3-ito",
+    ),
+    pytest.param(
+        make_case(
+            dim=3,
+            depth=2,
+            solution="stratonovich",
+            geometry=SO(3),
+            vector_field=so3_state_dependent_vector_field,
+            seed=2,
+        ),
+        id="so3-state-strat",
+    ),
+    pytest.param(
+        make_case(
+            dim=3,
+            depth=2,
+            solution="ito",
+            geometry=SO(3),
+            vector_field=so3_state_dependent_vector_field,
+            seed=2,
+        ),
+        id="so3-state-ito",
     ),
 ]
 
