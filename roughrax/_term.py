@@ -133,7 +133,7 @@ class SignatureInterpolation(AbstractPath):
 
 
 class RoughTerm(AbstractTerm[Array, Array]):
-    """Diffrax term over internally lifted rough-path coefficients."""
+    """Diffrax term over rough-path coefficients."""
 
     vector_field: VectorField = eqx.field(static=True)
     control: SignatureInterpolation
@@ -162,6 +162,19 @@ class RoughTerm(AbstractTerm[Array, Array]):
 
     def vf(self, t, y, args):
         del t, args
+        fields = jnp.asarray(self.vector_field(y))
+        logsig_size = len(self.basis.keys)
+        columns_shape = (*jnp.shape(y), logsig_size)
+        base_shape = (self.basis.dim, *jnp.shape(y))
+        if fields.shape == columns_shape and fields.shape != base_shape:
+            return jnp.moveaxis(fields, -1, 0)
+        if (
+            fields.ndim == 1
+            and fields.size == jnp.size(y) * logsig_size
+            and fields.shape != base_shape
+        ):
+            columns = jnp.reshape(fields, columns_shape)
+            return jnp.moveaxis(columns, -1, 0)
         return jnp.stack([field(y) for field in self.lifted_fields])
 
     def contr(self, t0, t1, **kwargs):
