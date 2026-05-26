@@ -3,7 +3,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from georax import Manifold, covariant_derivative, post_lie_bracket
+import jax
+from georax import Manifold, post_lie_bracket
 from jaxtyping import Array
 
 from roughrax._bases import PrimitiveBasis
@@ -11,6 +12,15 @@ from roughrax._bases import PrimitiveBasis
 
 VectorField = Callable[[Array], Array]
 LiftedField = Callable[[Array], Array]
+
+
+def _covariant_derivative_along(
+    geometry: Manifold[Any],
+    direction: Array,
+    field: LiftedField,
+    x: Array,
+) -> Array:
+    return jax.jvp(field, (x,), (geometry.detrivialise(x, direction),))[1]
 
 
 def _total_covariant_derivative(
@@ -21,29 +31,20 @@ def _total_covariant_derivative(
 ) -> Array:
     """Evaluate (nabla^k field)(args[0], ..., args[k - 1])(x)."""
 
-    if not args:
-        return field(x)
+    out = field
+    for arg in reversed(args):
+        direction = arg(x)
+        lower = out
 
-    first, *rest_list = args
-    rest = tuple(rest_list)
-
-    def lower(z: Array) -> Array:
-        return _total_covariant_derivative(geometry, field, rest, z)
-
-    out = covariant_derivative(geometry, first, lower, x)
-    for index, arg in enumerate(rest):
-
-        def corrected_arg(
+        def out(
             z: Array,
             *,
-            first: LiftedField = first,
-            arg: LiftedField = arg,
+            direction: Array = direction,
+            lower: LiftedField = lower,
         ) -> Array:
-            return covariant_derivative(geometry, first, arg, z)
+            return _covariant_derivative_along(geometry, direction, lower, z)
 
-        corrected_rest = rest[:index] + (corrected_arg,) + rest[index + 1 :]
-        out = out - _total_covariant_derivative(geometry, field, corrected_rest, x)
-    return out
+    return out(x)
 
 
 def form_pseudo_bialgebra_map(
