@@ -53,6 +53,8 @@ TARGET_CAP_RADIUS = 0.68
 SOFT_CAP_RADIUS = 0.84
 TARGET_VIDEO_SECONDS = 15.0
 END_PAUSE_SECONDS = 5.0
+PANEL_TITLE_Y = 0.86
+ERROR_LABEL_Y = 0.14
 WARMUP_BEFORE_TIMING = True
 DEFAULT_SEED = 7
 DEFAULT_T1 = 5.0
@@ -450,7 +452,7 @@ def validate_visible_sector(solves: list[SphereSolve]) -> None:
         )
 
 
-def configure_axis(ax, *, title: str) -> None:
+def configure_axis(ax) -> None:
     u = np.linspace(0.0, 2.0 * np.pi, 48)
     v = np.linspace(0.0, np.pi, 24)
     x = np.outer(np.cos(u), np.sin(v))
@@ -467,7 +469,6 @@ def configure_axis(ax, *, title: str) -> None:
         alpha=0.22,
         linewidth=0.55,
     )
-    ax.set_title(title, fontsize=11, pad=10)
     ax.set_xlim(-1.1, 1.1)
     ax.set_ylim(-1.1, 1.1)
     ax.set_zlim(-1.1, 1.1)
@@ -509,36 +510,42 @@ def make_animation(
         raise ValueError("Total animation duration must be positive.")
     frames = max(2, int(round(total_seconds * fps)))
     frame_seconds = np.linspace(0.0, total_seconds, frames)
-    fig = plt.figure(figsize=(10.5, 5.8), constrained_layout=True)
-    grid = fig.add_gridspec(2, 2, height_ratios=(1.0, 0.08))
-    axes = [fig.add_subplot(grid[0, i], projection="3d") for i in range(2)]
-    label_axes = [fig.add_subplot(grid[1, i]) for i in range(2)]
+    fig = plt.figure(figsize=(10.5, 5.4), constrained_layout=True)
+    axes = [fig.add_subplot(1, 2, i + 1, projection="3d") for i in range(2)]
     solves = [euler, log_ode]
     colors = ["#2667ff", "#d64045"]
     artists = []
 
-    for ax, label_ax, timed, color in zip(
-        axes, label_axes, solves, colors, strict=True
-    ):
+    for ax, timed, color in zip(axes, solves, colors, strict=True):
         solve = timed.solve
         title = (
             f"{solve.name}\n"
             f"{len(solve.ts) - 1} steps, timed {timed.elapsed_seconds:.3f}s, "
             f"finishes at {timed.finish_seconds:.1f}s"
         )
-        configure_axis(ax, title=title)
+        configure_axis(ax)
+        ax.text2D(
+            0.5,
+            PANEL_TITLE_Y,
+            title,
+            transform=ax.transAxes,
+            ha="center",
+            va="bottom",
+            fontsize=11,
+            color="#111111",
+        )
         (path_line,) = ax.plot([], [], [], color=color, alpha=0.9, linewidth=1.6)
-        label_ax.text(
+        ax.text2D(
             0.5,
-            0.5,
+            ERROR_LABEL_Y,
             f"final point error vs {reference.name}\n"
             f"{final_point_error(solve, reference):.3e}",
+            transform=ax.transAxes,
             ha="center",
-            va="center",
+            va="top",
             fontsize=9,
             color="#26332f",
         )
-        label_ax.set_axis_off()
         artists.append(path_line)
 
     fig.suptitle("One Brownian path on S^2, solved two ways", fontsize=13)

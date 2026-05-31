@@ -147,3 +147,7 @@ uv run python docs/examples/convergence.py
 ```
 
 Solves a 2D rough ODE driven by Brownian motion at orders 1, 2, 3 against a fine Wong-Zakai reference and plots `h^(p/2)` convergence to `docs/examples/outputs/log_ode_convergence.png`.
+
+## Sphere example
+
+![Brownian motion on a visible spherical cap solved with GeometricEuler and LogODE](docs/examples/outputs/worm_sphere_sde_side_by_side.gif)
