@@ -1,10 +1,12 @@
 """Brownian motion on a visible spherical cap via SO(3).
 
 This evolves an SO(3)-valued SDE, then displays the rotation applied to the
-north pole as a path on S^2. The same sampled Brownian path drives both solves:
+north pole as a path on S^2. The same sampled Brownian path drives all visible
+solves:
 
 * Georax `GeometricEuler` uses all fine Brownian increments.
-* Roughrax `LogODE(RKMK(Tsit5()))` uses a coarser log-signature grid.
+* Roughrax `LogODE(RKMK(Heun()))` uses a coarser log-signature grid.
+* Roughrax `CommutatorFreeLogODE2(RKMK(Heun()))` uses the same coarse grid.
 * Georax `SRKMK(GeneralShARK())` on the fine grid is used as a reference.
 
 Run with:
@@ -38,7 +40,13 @@ import matplotlib
 import numpy as np
 from georax import RKMK, SO, SRKMK, GeometricEuler, GeometricTerm
 
-from roughrax import LogODE, RoughTerm, SignatureInterpolation
+from roughrax import (
+    CommutatorFreeLogODE2,
+    LogODE,
+    RoughTerm,
+    SignatureInterpolation,
+    VirtualPathInterpolation,
+)
 
 matplotlib.use("Agg")
 import matplotlib.animation as animation
@@ -391,6 +399,58 @@ def make_log_ode_solve(
     return solve
 
 
+def make_commutator_free_log_ode_solve(
+    fine_ts: jax.Array,
+    brownian: jax.Array,
+    coarse_ts: jax.Array,
+    *,
+    y0: jax.Array,
+    diffusion_scale: float,
+    depth: int,
+) -> Callable[[], SphereSolve]:
+    driver_ys = jnp.concatenate([fine_ts[:, None], brownian], axis=1)
+    driver = diffrax.LinearInterpolation(ts=fine_ts, ys=driver_ys)
+    signature = SignatureInterpolation(
+        driver,
+        coarse_ts,
+        depth=depth,
+        solution="stratonovich",
+    )
+    control = VirtualPathInterpolation(signature)
+
+    def vector_field(y):
+        drift, diffusion_rows = cap_vector_fields(y, diffusion_scale=diffusion_scale)
+        return jnp.concatenate([drift[None, :], diffusion_rows], axis=0)
+
+    term = RoughTerm(vector_field, control, SO(3))
+    solver = CommutatorFreeLogODE2(RKMK(diffrax.Heun()))
+    stepsize_controller = diffrax.StepTo(coarse_ts)
+    saveat = diffrax.SaveAt(ts=coarse_ts)
+
+    def solve() -> SphereSolve:
+        sol = diffrax.diffeqsolve(
+            term,
+            solver,
+            t0=float(coarse_ts[0]),
+            t1=float(coarse_ts[-1]),
+            dt0=None,
+            y0=y0,
+            stepsize_controller=stepsize_controller,
+            saveat=saveat,
+            max_steps=coarse_ts.shape[0] + 4,
+            throw=True,
+        )
+        rotations = np.asarray(jax.block_until_ready(sol.ys))
+        return SphereSolve(
+            "Roughrax CommutatorFreeLogODE2 + RKMK(Heun)",
+            np.asarray(coarse_ts),
+            rotations,
+            sphere_points(rotations),
+        )
+
+    return solve
+
+
 def time_solve(solve_fn) -> tuple[SphereSolve, float]:
     if WARMUP_BEFORE_TIMING:
         solve_fn()
@@ -401,26 +461,18 @@ def time_solve(solve_fn) -> tuple[SphereSolve, float]:
 
 
 def normalise_finish_times(
-    euler: SphereSolve,
-    euler_elapsed: float,
-    log_ode: SphereSolve,
-    log_ode_elapsed: float,
-) -> tuple[TimedSolve, TimedSolve]:
-    euler_elapsed = max(euler_elapsed, 1e-12)
-    log_ode_elapsed = max(log_ode_elapsed, 1e-12)
-    slowest = max(euler_elapsed, log_ode_elapsed, 1e-12)
-    return (
+    timed_solves: list[tuple[SphereSolve, float]],
+) -> list[TimedSolve]:
+    elapsed = [max(elapsed_seconds, 1e-12) for _, elapsed_seconds in timed_solves]
+    slowest = max(elapsed, default=1e-12)
+    return [
         TimedSolve(
-            euler,
-            euler_elapsed,
-            TARGET_VIDEO_SECONDS * euler_elapsed / slowest,
-        ),
-        TimedSolve(
-            log_ode,
-            log_ode_elapsed,
-            TARGET_VIDEO_SECONDS * log_ode_elapsed / slowest,
-        ),
-    )
+            solve,
+            elapsed_seconds,
+            TARGET_VIDEO_SECONDS * elapsed_seconds / slowest,
+        )
+        for (solve, _), elapsed_seconds in zip(timed_solves, elapsed, strict=True)
+    ]
 
 
 def validate_rotation_solve(solve: SphereSolve) -> None:
@@ -497,26 +549,38 @@ def final_point_error(solve: SphereSolve, reference: SphereSolve) -> float:
 
 
 def make_animation(
-    euler: TimedSolve,
-    log_ode: TimedSolve,
+    timed_solves: list[TimedSolve],
     reference: SphereSolve,
     *,
     video_seconds: float,
     end_pause_seconds: float,
     fps: int,
 ):
+    if not timed_solves:
+        raise ValueError("At least one timed solve is required.")
+
     total_seconds = video_seconds + end_pause_seconds
     if total_seconds <= 0.0:
         raise ValueError("Total animation duration must be positive.")
     frames = max(2, int(round(total_seconds * fps)))
     frame_seconds = np.linspace(0.0, total_seconds, frames)
-    fig = plt.figure(figsize=(10.5, 5.4), constrained_layout=True)
-    axes = [fig.add_subplot(1, 2, i + 1, projection="3d") for i in range(2)]
-    solves = [euler, log_ode]
-    colors = ["#2667ff", "#d64045"]
+    fig = plt.figure(
+        figsize=(5.25 * len(timed_solves), 5.4),
+        constrained_layout=True,
+    )
+    axes = [
+        fig.add_subplot(1, len(timed_solves), i + 1, projection="3d")
+        for i in range(len(timed_solves))
+    ]
+    colors = ["#2667ff", "#d64045", "#148f77", "#8e44ad"]
     artists = []
 
-    for ax, timed, color in zip(axes, solves, colors, strict=True):
+    for ax, timed, color in zip(
+        axes,
+        timed_solves,
+        colors[: len(timed_solves)],
+        strict=True,
+    ):
         solve = timed.solve
         title = (
             f"{solve.name}\n"
@@ -548,12 +612,12 @@ def make_animation(
         )
         artists.append(path_line)
 
-    fig.suptitle("One Brownian path on S^2, solved two ways", fontsize=13)
+    fig.suptitle("One Brownian path on S^2, solved three ways", fontsize=13)
 
     def update(frame: int):
         display_second = frame_seconds[frame]
         changed = []
-        for timed, path_line in zip(solves, artists, strict=True):
+        for timed, path_line in zip(timed_solves, artists, strict=True):
             solve = timed.solve
             progress = min(display_second / timed.finish_seconds, 1.0)
             t = solve.ts[0] + progress * (solve.ts[-1] - solve.ts[0])
@@ -608,7 +672,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-stem",
         type=Path,
-        default=ROOT / "docs/examples/outputs/worm_sphere_sde_side_by_side",
+        default=ROOT / "docs/examples/outputs/worm_sphere_sde_three_way",
         help="Output path without extension.",
     )
     return parser.parse_args()
@@ -618,6 +682,8 @@ def main() -> None:
     args = parse_args()
     if args.fine_steps % args.coarse_steps != 0:
         raise ValueError("--fine-steps must be divisible by --coarse-steps.")
+    if args.depth != 2:
+        raise ValueError("CommutatorFreeLogODE2 panel requires --depth 2.")
     if args.fps < 1:
         raise ValueError("--fps must be at least 1.")
 
@@ -651,40 +717,55 @@ def main() -> None:
         diffusion_scale=args.diffusion_scale,
         depth=args.depth,
     )
+    solve_commutator_free = make_commutator_free_log_ode_solve(
+        fine_ts,
+        brownian,
+        coarse_ts,
+        y0=y0,
+        diffusion_scale=args.diffusion_scale,
+        depth=args.depth,
+    )
     euler, euler_elapsed = time_solve(solve_euler)
     log_ode, log_ode_elapsed = time_solve(solve_log_ode)
+    commutator_free, commutator_free_elapsed = time_solve(solve_commutator_free)
     reference = solve_reference()
+
     validate_rotation_solve(euler)
     validate_rotation_solve(log_ode)
+    validate_rotation_solve(commutator_free)
     validate_rotation_solve(reference)
-    validate_visible_sector([euler, log_ode, reference])
-    timed_euler, timed_log_ode = normalise_finish_times(
-        euler,
-        euler_elapsed,
-        log_ode,
-        log_ode_elapsed,
+    validate_visible_sector([euler, log_ode, commutator_free, reference])
+
+    timed_solves = normalise_finish_times(
+        [
+            (euler, euler_elapsed),
+            (log_ode, log_ode_elapsed),
+            (commutator_free, commutator_free_elapsed),
+        ]
     )
     print(
         "timed solves: "
-        f"GeometricEuler {timed_euler.elapsed_seconds:.3f}s "
-        f"(finishes at {timed_euler.finish_seconds:.1f}s), "
-        f"LogODE {timed_log_ode.elapsed_seconds:.3f}s "
-        f"(finishes at {timed_log_ode.finish_seconds:.1f}s)"
+        + ", ".join(
+            f"{timed.solve.name} {timed.elapsed_seconds:.3f}s "
+            f"(finishes at {timed.finish_seconds:.1f}s)"
+            for timed in timed_solves
+        )
     )
 
-    fig, anim = make_animation(
-        timed_euler,
-        timed_log_ode,
-        reference,
-        video_seconds=TARGET_VIDEO_SECONDS,
-        end_pause_seconds=END_PAUSE_SECONDS,
-        fps=args.fps,
-    )
-    for format_name in [item.strip() for item in args.formats.split(",") if item]:
-        output = args.output_stem.with_suffix(f".{format_name}")
-        print(f"saving {output}")
-        save_animation(anim, output, fps=args.fps, dpi=args.dpi)
-    plt.close(fig)
+    format_names = [item.strip() for item in args.formats.split(",") if item]
+    if format_names:
+        fig, anim = make_animation(
+            timed_solves,
+            reference,
+            video_seconds=TARGET_VIDEO_SECONDS,
+            end_pause_seconds=END_PAUSE_SECONDS,
+            fps=args.fps,
+        )
+        for format_name in format_names:
+            output = args.output_stem.with_suffix(f".{format_name}")
+            print(f"saving {output}")
+            save_animation(anim, output, fps=args.fps, dpi=args.dpi)
+        plt.close(fig)
 
 
 if __name__ == "__main__":

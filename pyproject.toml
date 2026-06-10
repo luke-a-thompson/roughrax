@@ -57,7 +57,7 @@ Repository = "https://github.com/luke-a-thompson/roughrax"
 Issues = "https://github.com/luke-a-thompson/roughrax/issues"
 
 [tool.uv.sources]
-georax = { git = "https://github.com/luke-a-thompson/georax.git" }
+georax = { path = "../georax" }
 pysiglib = { path = "/home/luke/pySigLibax" }
 pysiglib-cuda = { path = "/home/luke/pySigLibax/plugins/cuda" }
 

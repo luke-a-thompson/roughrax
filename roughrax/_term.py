@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Literal
 
 import equinox as eqx
+import jax
 import jax.numpy as jnp
 import pysiglib.jax_api as pysiglib
 from diffrax import AbstractPath, AbstractTerm
@@ -21,6 +22,7 @@ from roughrax._pseudo_bialgebra_map import (
     VectorField,
     form_pseudo_bialgebra_map,
 )
+from roughrax._virtual_path import virtual_increments_depth2
 
 
 class SignatureInterpolation(AbstractPath):
@@ -132,11 +134,103 @@ class SignatureInterpolation(AbstractPath):
         return cumulative[index] + fraction * self.coeffs[index]
 
 
+class VirtualPathInterpolation(AbstractPath):
+    """Precomputed virtual increments for depth-2 commutator-free solves."""
+
+    signature: SignatureInterpolation
+    ts: Array
+    coeffs: Array | None
+    virtual_increments_array: Array | None
+    basis: PrimitiveBasis | None = eqx.field(static=True)
+    depth: int = eqx.field(static=True)
+    solution: Literal["ito", "stratonovich"] = eqx.field(static=True)
+    factorisation: Literal["spectral", "pairwise"] = eqx.field(static=True)
+
+    @property
+    def t0(self):
+        return self.ts[0]
+
+    @property
+    def t1(self):
+        return self.ts[-1]
+
+    def __init__(
+        self,
+        signature: SignatureInterpolation,
+        *,
+        factorisation: Literal["spectral", "pairwise"] = "spectral",
+    ):
+        if not isinstance(signature, SignatureInterpolation):
+            raise TypeError(
+                "VirtualPathInterpolation requires a SignatureInterpolation."
+            )
+
+        self.signature = signature
+        self.ts = signature.ts
+        self.coeffs = signature.coeffs
+        self.virtual_increments_array = None
+        self.basis = signature.basis
+        self.depth = signature.depth
+        self.solution = signature.solution
+        self.factorisation = factorisation
+
+    def materialise(self, geometry: Manifold[Any]) -> VirtualPathInterpolation:
+        if self.virtual_increments_array is not None:
+            return self
+
+        signature = self.signature.materialise(geometry)
+        if signature.solution != "stratonovich":
+            raise ValueError(
+                "VirtualPathInterpolation only supports solution='stratonovich'."
+            )
+        if signature.depth != 2:
+            raise ValueError("VirtualPathInterpolation only supports depth=2.")
+        if signature.basis is None:
+            raise ValueError("SignatureInterpolation must have a materialised basis.")
+        if signature.basis.kind != "lyndon":
+            raise ValueError("VirtualPathInterpolation requires a Lyndon basis.")
+        if signature.coeffs is None:
+            raise ValueError(
+                "SignatureInterpolation must have materialised coefficients."
+            )
+
+        virtual_increments = jax.vmap(
+            lambda coeffs: virtual_increments_depth2(
+                coeffs,
+                signature.basis,
+                factorisation=self.factorisation,
+            )
+        )(signature.coeffs)
+
+        out = VirtualPathInterpolation(signature, factorisation=self.factorisation)
+        object.__setattr__(out, "coeffs", signature.coeffs)
+        object.__setattr__(out, "virtual_increments_array", virtual_increments)
+        object.__setattr__(out, "basis", signature.basis)
+        return out
+
+    def evaluate(self, t0, t1=None, left=True):
+        return self.signature.evaluate(t0, t1, left=left)
+
+    def virtual_increments(self, t0, t1):
+        if self.virtual_increments_array is None:
+            raise ValueError("VirtualPathInterpolation must be materialised first.")
+
+        index = jnp.searchsorted(self.ts, t0, side="right") - 1
+        index = jnp.clip(index, 0, self.virtual_increments_array.shape[0] - 1)
+        increments = self.virtual_increments_array[index]
+        invalid_interval = (t0 != self.ts[index]) | (t1 != self.ts[index + 1])
+        return eqx.error_if(
+            increments,
+            invalid_interval,
+            "VirtualPathInterpolation only supports exact knot-to-knot intervals.",
+        )
+
+
 class RoughTerm(AbstractTerm[Array, Array]):
     """Diffrax term over rough-path coefficients."""
 
     vector_field: VectorField = eqx.field(static=True)
-    control: SignatureInterpolation
+    control: SignatureInterpolation | VirtualPathInterpolation
     basis: PrimitiveBasis = eqx.field(static=True)
     lifted_fields: tuple[LiftedField, ...] = eqx.field(static=True)
     geometry: Manifold[Any] = Euclidean()
@@ -144,11 +238,14 @@ class RoughTerm(AbstractTerm[Array, Array]):
     def __init__(
         self,
         vector_field: VectorField,
-        control: SignatureInterpolation,
+        control: SignatureInterpolation | VirtualPathInterpolation,
         geometry: Manifold[Any] = Euclidean(),
     ):
-        if not isinstance(control, SignatureInterpolation):
-            raise TypeError("RoughTerm control must be a SignatureInterpolation.")
+        if not isinstance(control, (SignatureInterpolation, VirtualPathInterpolation)):
+            raise TypeError(
+                "RoughTerm control must be a SignatureInterpolation or "
+                "VirtualPathInterpolation."
+            )
         control = control.materialise(geometry)
         assert control.basis is not None
 
@@ -177,6 +274,29 @@ class RoughTerm(AbstractTerm[Array, Array]):
             return jnp.moveaxis(columns, -1, 0)
         return jnp.stack([field(y) for field in self.lifted_fields])
 
+    def base_vf(self, y):
+        """Evaluate only the base vector fields V_i."""
+
+        fields = jnp.asarray(self.vector_field(y))
+        coordinate_shape = (
+            jnp.shape(y)
+            if isinstance(self.geometry, Euclidean)
+            else self.geometry.coordinate_shape
+        )
+        expected_shape = (self.basis.dim, *coordinate_shape)
+        if fields.shape != expected_shape:
+            raise ValueError(
+                "Commutator-free solvers require vector_field(y) to return "
+                "base vector fields with shape "
+                f"{expected_shape}, got {fields.shape}."
+            )
+        return fields
+
+    def base_vf_prod(self, y, control):
+        """Contract a first-level control increment against base vector fields."""
+
+        return jnp.tensordot(control, self.base_vf(y), axes=1)
+
     def contr(self, t0, t1, **kwargs):
         return self.control.evaluate(t0, t1, **kwargs)
 
@@ -188,10 +308,15 @@ class RoughTerm(AbstractTerm[Array, Array]):
         return True
 
 
-def unwrap_rough_term(term) -> RoughTerm:
+def unwrap_rough_term(term: AbstractTerm) -> RoughTerm:
     while isinstance(term, WrapTerm):
         term = term.term
     return term
 
 
-__all__ = ["RoughTerm", "SignatureInterpolation", "unwrap_rough_term"]
+__all__ = [
+    "RoughTerm",
+    "SignatureInterpolation",
+    "VirtualPathInterpolation",
+    "unwrap_rough_term",
+]

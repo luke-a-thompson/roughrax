@@ -13,7 +13,13 @@ import pysiglib.jax_api as pysiglib
 import pytest
 from georax import CG2, SO, Euclidean, Manifold
 
-from roughrax import LogODE, RoughTerm, SignatureInterpolation
+from roughrax import (
+    CommutatorFreeLogODE2,
+    LogODE,
+    RoughTerm,
+    SignatureInterpolation,
+    VirtualPathInterpolation,
+)
 from roughrax._bases import (
     PrimitiveBasis,
     make_lyndon_basis,
@@ -33,6 +39,38 @@ class BenchmarkCase:
     ts: np.ndarray
     coarse_ts: np.ndarray
     ys: np.ndarray
+
+
+@dataclass(frozen=True)
+class CommutatorFreeBenchmarkCase:
+    state_dim: int
+    vector_field: Callable
+    ts: np.ndarray
+    coarse_ts: np.ndarray
+    ys: np.ndarray
+
+
+class MLPVectorField(eqx.Module):
+    """MLP with dense weight matrices, so each evaluation costs real matmuls.
+
+    This compute-bound regime is where the commutator-free solver's O(d)
+    evaluations should beat the log-ODE's O(d^2) bracket JVPs.
+    """
+
+    config: tuple = eqx.field(static=True)
+
+    def __call__(self, y):
+        dim, state_dim, width, num_layers, seed = self.config
+        rng = np.random.default_rng(seed)
+        sizes = (state_dim, *(width,) * num_layers)
+        hidden = y
+        for fan_in, fan_out in zip(sizes[:-1], sizes[1:]):
+            weight = rng.normal(scale=fan_in**-0.5, size=(fan_in, fan_out))
+            hidden = jnp.tanh(hidden @ jnp.asarray(weight, dtype=y.dtype))
+        readout = rng.normal(scale=width**-0.5, size=(width, dim * state_dim))
+        return jnp.tanh(hidden @ jnp.asarray(readout, dtype=y.dtype)).reshape(
+            dim, y.shape[0]
+        )
 
 
 def rough_vector_field(y):
@@ -151,6 +189,33 @@ CASES = [
         ),
         id="so3-state-ito",
     ),
+]
+
+
+def make_commutator_free_case(
+    *,
+    dim: int,
+    state_dim: int,
+    seed: int,
+) -> CommutatorFreeBenchmarkCase:
+    num_fine_steps = 256
+    signature_window_size = 16
+    ts = np.linspace(0.0, 1.0, num_fine_steps + 1)
+    return CommutatorFreeBenchmarkCase(
+        state_dim=state_dim,
+        vector_field=MLPVectorField(config=(dim, state_dim, 512, 2, seed)),
+        ts=ts,
+        coarse_ts=ts[::signature_window_size],
+        ys=brownian_like_path(dim=dim, num_steps=num_fine_steps, seed=seed + 100),
+    )
+
+
+COMMUTATOR_FREE_CASES = [
+    pytest.param(
+        make_commutator_free_case(dim=dim, state_dim=128, seed=7 * dim),
+        id=f"d{dim}-h128",
+    )
+    for dim in (4, 8, 16)
 ]
 
 
@@ -292,6 +357,32 @@ def solve_log_ode(case: BenchmarkCase):
     return jax.block_until_ready(y1)
 
 
+def commutator_free_evaluation_state(case: CommutatorFreeBenchmarkCase):
+    return jnp.linspace(-0.1, 0.1, case.state_dim)
+
+
+def make_depth2_stratonovich_term(
+    case: CommutatorFreeBenchmarkCase,
+    solver_name: Literal["log-ode", "commutator-free"],
+) -> RoughTerm:
+    driver = diffrax.LinearInterpolation(
+        ts=jnp.asarray(case.ts),
+        ys=jnp.asarray(case.ys),
+    )
+    signature = SignatureInterpolation(
+        driver,
+        jnp.asarray(case.coarse_ts),
+        depth=2,
+        solution="stratonovich",
+    )
+    control = (
+        VirtualPathInterpolation(signature).materialise(Euclidean())
+        if solver_name == "commutator-free"
+        else signature.materialise(Euclidean())
+    )
+    return RoughTerm(case.vector_field, control, Euclidean())
+
+
 @eqx.filter_jit
 def _solve_log_ode(
     ts,
@@ -315,6 +406,33 @@ def _solve_log_ode(
     sol = diffrax.diffeqsolve(
         term,
         LogODE(solver),
+        t0=signature_knots[0],
+        t1=signature_knots[-1],
+        dt0=None,
+        y0=y0,
+        stepsize_controller=diffrax.StepTo(signature_knots),
+        saveat=diffrax.SaveAt(t1=True),
+        max_steps=signature_knots.shape[0] + 4,
+    )
+    return sol.ys[-1]
+
+
+@eqx.filter_jit
+def _solve_prepared_depth2_stratonovich_case(
+    term,
+    signature_knots,
+    y0,
+    solver_name: Literal["log-ode", "commutator-free"],
+):
+    inner_solver = diffrax.Heun()
+    solver = (
+        CommutatorFreeLogODE2(inner_solver)
+        if solver_name == "commutator-free"
+        else LogODE(inner_solver)
+    )
+    sol = diffrax.diffeqsolve(
+        term,
+        solver,
         t0=signature_knots[0],
         t1=signature_knots[-1],
         dt0=None,
@@ -352,6 +470,40 @@ def test_benchmark_log_ode_solve(benchmark, case: BenchmarkCase):
     solve_log_ode(case)
     y1 = benchmark(solve_log_ode, case)
     assert y1.shape == evaluation_state(case).shape
+
+
+@pytest.mark.benchmark(group="commutator-free-log-ode-2")
+@pytest.mark.parametrize("case", COMMUTATOR_FREE_CASES)
+@pytest.mark.parametrize(
+    "solver_name",
+    [
+        pytest.param("log-ode", id="log-ode"),
+        pytest.param("commutator-free", id="commutator-free"),
+    ],
+)
+def test_benchmark_commutator_free_log_ode_2(
+    benchmark,
+    case: CommutatorFreeBenchmarkCase,
+    solver_name: Literal["log-ode", "commutator-free"],
+):
+    term = make_depth2_stratonovich_term(case, solver_name)
+    signature_knots = jnp.asarray(case.coarse_ts)
+    y0 = commutator_free_evaluation_state(case)
+
+    _solve_prepared_depth2_stratonovich_case(
+        term,
+        signature_knots,
+        y0,
+        solver_name,
+    )
+    y1 = benchmark(
+        _solve_prepared_depth2_stratonovich_case,
+        term,
+        signature_knots,
+        y0,
+        solver_name,
+    )
+    assert y1.shape == commutator_free_evaluation_state(case).shape
 
 
 @pytest.mark.benchmark(group="rough-term")
