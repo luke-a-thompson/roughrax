@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from functools import cache
 from typing import Literal
 
 import jax.numpy as jnp
@@ -24,6 +25,31 @@ def _assemble_increments(first: Array, p: Array, q: Array) -> Array:
     """
 
     loops = jnp.stack([p, q, -p - q], axis=1).reshape(-1, first.shape[0])
+    return jnp.concatenate([first[None, :], loops], axis=0)
+
+
+@cache
+def _compact_loop_transform(rank: int) -> np.ndarray:
+    """Return the static transform from spectral pairs to compact loop edges."""
+
+    size = 2 * rank
+    transform = np.eye(size)
+    for block in range(1, rank):
+        start = 2 * block
+        columns = slice(start, start + 2)
+        transform[:start:2, columns] = 1.0
+        transform[1:start:2, columns] = -1.0
+    return transform
+
+
+def _assemble_compact_increments(first: Array, p: Array, q: Array) -> Array:
+    """Prepend ``first`` to one closed polygon encoding all spectral area pairs."""
+
+    pairs = jnp.stack([p, q], axis=1).reshape(-1, first.shape[0])
+    transform = jnp.asarray(_compact_loop_transform(p.shape[0]), dtype=first.dtype)
+    body = transform @ pairs
+    closing = -jnp.sum(body, axis=0, keepdims=True)
+    loops = jnp.concatenate([body, closing], axis=0)
     return jnp.concatenate([first[None, :], loops], axis=0)
 
 
@@ -73,7 +99,7 @@ def spectral_virtual_increments_depth2(
     p = scales[:, None] * jnp.imag(eigvecs[:, -rank:]).T
     q = scales[:, None] * jnp.real(eigvecs[:, -rank:]).T
 
-    return _assemble_increments(first, p, q)
+    return _assemble_compact_increments(first, p, q)
 
 
 def pairwise_virtual_increments_depth2(

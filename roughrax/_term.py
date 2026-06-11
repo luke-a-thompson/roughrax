@@ -31,6 +31,7 @@ class SignatureInterpolation(AbstractPath):
     control: AbstractPath
     ts: Array
     coeffs: Array | None
+    cumulative_coeffs: Array | None
     basis: PrimitiveBasis | None = eqx.field(static=True)
     depth: int = eqx.field(static=True)
     solution: Literal["ito", "stratonovich"] = eqx.field(static=True)
@@ -59,6 +60,7 @@ class SignatureInterpolation(AbstractPath):
         self.control = control
         self.ts = jnp.asarray(signature_knots)
         self.coeffs = None
+        self.cumulative_coeffs = None
         self.basis = None
         self.depth = depth
         self.solution = solution
@@ -106,8 +108,14 @@ class SignatureInterpolation(AbstractPath):
             case _:
                 raise ValueError(f"Unknown solution type {self.solution!r}.")
 
+        cumulative = jnp.concatenate(
+            [jnp.zeros_like(coeffs[:1]), jnp.cumsum(coeffs, axis=0)],
+            axis=0,
+        )
+
         out = SignatureInterpolation(self.control, self.ts, self.depth, self.solution)
         object.__setattr__(out, "coeffs", coeffs)
+        object.__setattr__(out, "cumulative_coeffs", cumulative)
         object.__setattr__(out, "basis", basis)
         return out
 
@@ -121,17 +129,11 @@ class SignatureInterpolation(AbstractPath):
 
     def _evaluate(self, t):
         assert self.coeffs is not None
+        assert self.cumulative_coeffs is not None
         index = jnp.searchsorted(self.ts, t, side="right") - 1
         index = jnp.clip(index, 0, self.coeffs.shape[0] - 1)
-        cumulative = jnp.concatenate(
-            [
-                jnp.zeros_like(self.coeffs[:1]),
-                jnp.cumsum(self.coeffs, axis=0),
-            ],
-            axis=0,
-        )
         fraction = (t - self.ts[index]) / (self.ts[index + 1] - self.ts[index])
-        return cumulative[index] + fraction * self.coeffs[index]
+        return self.cumulative_coeffs[index] + fraction * self.coeffs[index]
 
 
 class VirtualPathInterpolation(AbstractPath):
@@ -178,13 +180,14 @@ class VirtualPathInterpolation(AbstractPath):
         if self.virtual_increments_array is not None:
             return self
 
-        signature = self.signature.materialise(geometry)
-        if signature.solution != "stratonovich":
+        if self.solution != "stratonovich":
             raise ValueError(
                 "VirtualPathInterpolation only supports solution='stratonovich'."
             )
-        if signature.depth != 2:
+        if self.depth != 2:
             raise ValueError("VirtualPathInterpolation only supports depth=2.")
+
+        signature = self.signature.materialise(geometry)
         if signature.basis is None:
             raise ValueError("SignatureInterpolation must have a materialised basis.")
         if signature.basis.kind != "lyndon":
@@ -295,6 +298,8 @@ class RoughTerm(AbstractTerm[Array, Array]):
     def base_vf_prod(self, y, control):
         """Contract a first-level control increment against base vector fields."""
 
+        if hasattr(self.vector_field, "vf_prod"):
+            return self.vector_field.vf_prod(y, control)
         return jnp.tensordot(control, self.base_vf(y), axes=1)
 
     def contr(self, t0, t1, **kwargs):

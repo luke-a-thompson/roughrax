@@ -48,7 +48,6 @@ dependencies = [
     "jaxtyping>=0.3.0",
     "numpy>=2.0",
     "pysiglib>=3.0.3",
-    "pysiglib-cuda>=3.0.3",
 ]
 
 [project.urls]
@@ -57,9 +56,7 @@ Repository = "https://github.com/luke-a-thompson/roughrax"
 Issues = "https://github.com/luke-a-thompson/roughrax/issues"
 
 [tool.uv.sources]
-georax = { path = "../georax" }
-pysiglib = { path = "/home/luke/pySigLibax" }
-pysiglib-cuda = { path = "/home/luke/pySigLibax/plugins/cuda" }
+georax = { git = "https://github.com/luke-a-thompson/georax" }
 
 [project.optional-dependencies]
 dev = [

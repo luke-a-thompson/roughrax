@@ -59,7 +59,7 @@ class MLPVectorField(eqx.Module):
 
     config: tuple = eqx.field(static=True)
 
-    def __call__(self, y):
+    def _readout(self, y):
         dim, state_dim, width, num_layers, seed = self.config
         rng = np.random.default_rng(seed)
         sizes = (state_dim, *(width,) * num_layers)
@@ -68,9 +68,13 @@ class MLPVectorField(eqx.Module):
             weight = rng.normal(scale=fan_in**-0.5, size=(fan_in, fan_out))
             hidden = jnp.tanh(hidden @ jnp.asarray(weight, dtype=y.dtype))
         readout = rng.normal(scale=width**-0.5, size=(width, dim * state_dim))
-        return jnp.tanh(hidden @ jnp.asarray(readout, dtype=y.dtype)).reshape(
-            dim, y.shape[0]
-        )
+        return jnp.tanh(hidden @ jnp.asarray(readout, dtype=y.dtype)).reshape(dim, -1)
+
+    def __call__(self, y):
+        return self._readout(y)
+
+    def vf_prod(self, y, control):
+        return jnp.tensordot(control, self._readout(y), axes=1)
 
 
 def rough_vector_field(y):

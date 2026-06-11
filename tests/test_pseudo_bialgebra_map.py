@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
-from georax import SO, Euclidean, covariant_derivative, post_lie_bracket
+from georax import SO, Euclidean
+from georax._geometry.base import covariant_derivative, post_lie_bracket
 
 from roughrax._bases import make_lyndon_basis
 from roughrax._pseudo_bialgebra_map import (
@@ -66,9 +67,7 @@ def test_total_covariant_derivative_matches_corrected_reference_under_jit():
     args = (arg0, arg1, arg2)
     x = jnp.asarray(0.37)
 
-    actual = jax.jit(
-        lambda y: _total_covariant_derivative(geometry, root, args, y)
-    )(x)
+    actual = jax.jit(lambda y: _total_covariant_derivative(geometry, root, args, y))(x)
     expected = _reference_total_covariant_derivative(geometry, root, args, x)
 
     assert jnp.allclose(actual, expected, rtol=1e-5, atol=1e-6)
@@ -125,9 +124,7 @@ def test_total_covariant_derivative_matches_corrected_reference_on_so3():
         ]
     )
 
-    actual = jax.jit(
-        lambda y: _total_covariant_derivative(geometry, root, args, y)
-    )(x)
+    actual = jax.jit(lambda y: _total_covariant_derivative(geometry, root, args, y))(x)
     expected = _reference_total_covariant_derivative(geometry, root, args, x)
 
     assert jnp.allclose(actual, expected, rtol=1e-5, atol=1e-6)

@@ -6,9 +6,9 @@ import jax
 import jax.numpy as jnp
 import pytest
 from georax import RKMK, SO, Euclidean
+
 import roughrax._pseudo_bialgebra_map as pseudo_bialgebra_module
 import roughrax._term as term_module
-
 from roughrax import (
     CommutatorFreeLogODE2,
     LogODE,
@@ -82,7 +82,7 @@ def test_virtual_factorisation_is_filter_jit_safe():
         return virtual_increments_depth2(coeffs, basis)
 
     increments = factorise(_deterministic_coeffs(basis))
-    assert increments.shape == (1 + 3 * (dim // 2), dim)
+    assert increments.shape == (2 + 2 * (dim // 2), dim)
 
 
 def test_commutator_free_solver_runs_under_filter_jit():
