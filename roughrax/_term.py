@@ -94,7 +94,6 @@ class SignatureInterpolation(AbstractPath):
                 coeffs = pysiglib.branched_log_sig(
                     windows,
                     self.depth,
-                    tree_order="canonical",
                     planar=planar,
                 )
             case "stratonovich":

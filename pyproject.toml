@@ -44,11 +44,10 @@ dependencies = [
     "diffrax>=0.7.1",
     "equinox>=0.13.0",
     "georax>=0.1.0",
-    "jax[cuda]>=0.9.1",
     "jaxtyping>=0.3.0",
     "numpy>=2.0",
     "pysiglib>=3.0.3",
-    "pysiglib-cuda>=3.0.3",
+    "torch>=2.12.0",
 ]
 
 [project.urls]
@@ -58,8 +57,14 @@ Issues = "https://github.com/luke-a-thompson/roughrax/issues"
 
 [tool.uv.sources]
 georax = { git = "https://github.com/luke-a-thompson/georax.git" }
-pysiglib = { path = "/home/luke/pySigLibax" }
-pysiglib-cuda = { path = "/home/luke/pySigLibax/plugins/cuda" }
+torch = [
+    { index = "pytorch-cpu" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
 
 [project.optional-dependencies]
 dev = [

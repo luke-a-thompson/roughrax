@@ -177,7 +177,6 @@ def signature_coefficients(case: BenchmarkCase):
         pysiglib.branched_log_sig(
             case.ys[indices[j] : indices[j + 1] + 1],
             case.depth,
-            tree_order="canonical",
             planar=planar,
         )
         for j in range(len(indices) - 1)
