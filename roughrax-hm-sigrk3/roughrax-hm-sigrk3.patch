@@ -1,0 +1,1080 @@
+diff -ruN a/docs/examples/hm_vs_log_ode.py b/docs/examples/hm_vs_log_ode.py
+--- a/docs/examples/hm_vs_log_ode.py	1970-01-01 00:00:00.000000000 +0000
++++ b/docs/examples/hm_vs_log_ode.py	2026-07-24 14:07:58.262661334 +0000
+@@ -0,0 +1,349 @@
++"""Compare HMSigRK3 and LogODE on the same degree-three log-signatures."""
++
++# ruff: noqa: E402
++
++from __future__ import annotations
++
++import argparse
++import csv
++import gc
++import os
++import sys
++import time
++from pathlib import Path
++
++os.environ.setdefault("JAX_PLATFORMS", "cpu")
++os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
++
++ROOT = Path(__file__).resolve().parents[2]
++if str(ROOT) not in sys.path:
++    sys.path.insert(0, str(ROOT))
++
++import diffrax
++import equinox as eqx
++import jax
++import jax.numpy as jnp
++import matplotlib
++import numpy as np
++from georax import Euclidean
++
++from roughrax import HMSigRK3, LogODE, RoughTerm, SignatureInterpolation
++
++
++matplotlib.use("Agg")
++import matplotlib.pyplot as plt
++
++
++jax.config.update("jax_enable_x64", True)
++
++
++def to_numpy(value) -> np.ndarray:
++    result = np.asarray(jax.block_until_ready(value))
++    gc.collect()
++    return result
++
++
++def rough_vector_field(y):
++    return jnp.stack([jnp.cos(y), jnp.sin(y)])
++
++
++def control_vector_field(t, y, args):
++    del t, args
++    return rough_vector_field(y)
++
++
++def brownian_paths(
++    *, exponent: int, num_paths: int, seed: int, t1: float
++) -> tuple[np.ndarray, np.ndarray]:
++    num_steps = 2**exponent
++    ts = np.linspace(0.0, t1, num_steps + 1, dtype=np.float64)
++    generator = np.random.default_rng(seed)
++    increments = generator.normal(
++        scale=np.sqrt(t1 / num_steps),
++        size=(num_paths, num_steps, 2),
++    )
++    paths = np.concatenate(
++        [
++            np.zeros((num_paths, 1, 2), dtype=np.float64),
++            np.cumsum(increments, axis=1),
++        ],
++        axis=1,
++    )
++    return ts, paths
++
++
++@jax.jit
++def solve_reference_batch(ts, paths, y0):
++    def solve_one(path):
++        term = diffrax.ControlTerm(
++            control_vector_field,
++            diffrax.LinearInterpolation(ts=ts, ys=path),
++        )
++        solution = diffrax.diffeqsolve(
++            term,
++            diffrax.Dopri5(),
++            t0=ts[0],
++            t1=ts[-1],
++            dt0=None,
++            y0=y0,
++            stepsize_controller=diffrax.StepTo(ts),
++            saveat=diffrax.SaveAt(t1=True),
++            max_steps=ts.shape[0] + 4,
++        )
++        return solution.ys[-1]
++
++    return jax.vmap(solve_one)(paths)
++
++
++def materialise_log_signatures(
++    ts: np.ndarray,
++    paths: np.ndarray,
++    coarse_ts: np.ndarray,
++) -> tuple[RoughTerm, jax.Array]:
++    template = None
++    coefficients = []
++    ts_jax = jnp.asarray(ts)
++    coarse_ts_jax = jnp.asarray(coarse_ts)
++
++    for path in paths:
++        control = SignatureInterpolation(
++            diffrax.LinearInterpolation(ts=ts_jax, ys=jnp.asarray(path)),
++            coarse_ts_jax,
++            depth=3,
++            solution="stratonovich",
++        )
++        term = RoughTerm(rough_vector_field, control, Euclidean())
++        if template is None:
++            template = term
++        coefficients.append(np.asarray(term.control.coeffs))
++
++    if template is None:
++        raise ValueError("At least one path is required.")
++    return template, jnp.asarray(np.stack(coefficients))
++
++
++@eqx.filter_jit
++def solve_from_coefficients_batch(
++    term_template: RoughTerm,
++    coefficients_batch: jax.Array,
++    coarse_ts: jax.Array,
++    y0: jax.Array,
++    solver,
++):
++    def solve_one(coefficients):
++        term = eqx.tree_at(
++            lambda candidate: candidate.control.coeffs,
++            term_template,
++            coefficients,
++        )
++        solution = diffrax.diffeqsolve(
++            term,
++            solver,
++            t0=coarse_ts[0],
++            t1=coarse_ts[-1],
++            dt0=None,
++            y0=y0,
++            stepsize_controller=diffrax.StepTo(coarse_ts),
++            saveat=diffrax.SaveAt(t1=True),
++            max_steps=coarse_ts.shape[0] + 4,
++        )
++        return solution.ys[-1]
++
++    return jax.vmap(solve_one)(coefficients_batch)
++
++
++def time_compiled_solve(
++    term_template,
++    coefficients_batch,
++    coarse_ts,
++    y0,
++    solver,
++    repeats: int,
++):
++    start = time.perf_counter()
++    values = solve_from_coefficients_batch(
++        term_template,
++        coefficients_batch,
++        coarse_ts,
++        y0,
++        solver,
++    )
++    jax.block_until_ready(values)
++    compile_and_first = time.perf_counter() - start
++
++    timings = []
++    for _ in range(repeats):
++        start = time.perf_counter()
++        values = solve_from_coefficients_batch(
++            term_template,
++            coefficients_batch,
++            coarse_ts,
++            y0,
++            solver,
++        )
++        jax.block_until_ready(values)
++        timings.append(time.perf_counter() - start)
++    return values, compile_and_first, float(np.median(timings))
++
++
++def make_inner_solver(name: str):
++    match name:
++        case "tsit5":
++            return diffrax.Tsit5()
++        case "dopri5":
++            return diffrax.Dopri5()
++        case "heun":
++            return diffrax.Heun()
++    raise ValueError(f"Unknown LogODE inner solver {name!r}.")
++
++
++def write_csv(rows: list[dict[str, float | int | str]], output: Path) -> None:
++    output.parent.mkdir(parents=True, exist_ok=True)
++    with output.open("w", newline="") as handle:
++        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
++        writer.writeheader()
++        writer.writerows(rows)
++
++
++def plot_results(rows: list[dict[str, float | int | str]], output: Path) -> None:
++    figure, axes = plt.subplots(1, 2, figsize=(10, 4))
++    for method in ("HMSigRK3", "LogODE"):
++        selected = [row for row in rows if row["method"] == method]
++        runtimes = np.asarray([row["median_seconds_per_path"] for row in selected])
++        errors = np.asarray([row["endpoint_rmse"] for row in selected])
++        steps = np.asarray([row["num_steps"] for row in selected])
++        axes[0].loglog(runtimes, errors, marker="o", label=method)
++        axes[1].loglog(steps, errors, marker="o", label=method)
++
++    axes[0].set_xlabel("median solve time per path [s]")
++    axes[0].set_ylabel("endpoint RMSE")
++    axes[1].set_xlabel("number of rough steps")
++    axes[1].set_ylabel("endpoint RMSE")
++    for axis in axes:
++        axis.grid(True, which="both", alpha=0.25)
++        axis.legend()
++    figure.tight_layout()
++    output.parent.mkdir(parents=True, exist_ok=True)
++    figure.savefig(output, dpi=200)
++    plt.close(figure)
++
++
++def parse_args() -> argparse.Namespace:
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("--seed", type=int, default=0)
++    parser.add_argument("--num-paths", type=int, default=8)
++    parser.add_argument("--fine-exponent", type=int, default=12)
++    parser.add_argument(
++        "--coarse-exponents",
++        type=int,
++        nargs="+",
++        default=[4, 5, 6, 7, 8],
++    )
++    parser.add_argument("--t1", type=float, default=1.0)
++    parser.add_argument("--y0", type=float, default=1.0)
++    parser.add_argument("--repeats", type=int, default=5)
++    parser.add_argument(
++        "--logode-inner",
++        choices=("tsit5", "dopri5", "heun"),
++        default="tsit5",
++    )
++    parser.add_argument(
++        "--csv",
++        type=Path,
++        default=Path(__file__).resolve().parent
++        / "outputs"
++        / "hm_vs_log_ode.csv",
++    )
++    parser.add_argument(
++        "--plot",
++        type=Path,
++        default=Path(__file__).resolve().parent
++        / "outputs"
++        / "hm_vs_log_ode.png",
++    )
++    return parser.parse_args()
++
++
++def main() -> None:
++    args = parse_args()
++    if args.num_paths < 1:
++        raise ValueError("--num-paths must be positive.")
++    if args.repeats < 1:
++        raise ValueError("--repeats must be positive.")
++    if any(exponent >= args.fine_exponent for exponent in args.coarse_exponents):
++        raise ValueError("Every coarse exponent must be below --fine-exponent.")
++
++    ts, paths = brownian_paths(
++        exponent=args.fine_exponent,
++        num_paths=args.num_paths,
++        seed=args.seed,
++        t1=args.t1,
++    )
++    print("computing fine Wong--Zakai references")
++    references = to_numpy(
++        solve_reference_batch(
++            jnp.asarray(ts),
++            jnp.asarray(paths),
++            jnp.asarray(args.y0),
++        )
++    )
++
++    solvers = {
++        "HMSigRK3": HMSigRK3(),
++        "LogODE": LogODE(make_inner_solver(args.logode_inner)),
++    }
++    rows: list[dict[str, float | int | str]] = []
++
++    for exponent in args.coarse_exponents:
++        stride = 2 ** (args.fine_exponent - exponent)
++        coarse_ts = ts[::stride]
++        print(
++            f"materialising degree-three log-signatures for {2**exponent} steps"
++        )
++        start = time.perf_counter()
++        template, coefficients_batch = materialise_log_signatures(
++            ts,
++            paths,
++            coarse_ts,
++        )
++        preprocessing_seconds = time.perf_counter() - start
++        coarse_ts_jax = jnp.asarray(coarse_ts)
++
++        for method, solver in solvers.items():
++            values, compile_seconds, median_seconds = time_compiled_solve(
++                template,
++                coefficients_batch,
++                coarse_ts_jax,
++                jnp.asarray(args.y0),
++                solver,
++                args.repeats,
++            )
++            values_np = to_numpy(values)
++            rmse = float(np.sqrt(np.mean((values_np - references) ** 2)))
++            row = {
++                "method": method,
++                "num_steps": 2**exponent,
++                "step_size": args.t1 / 2**exponent,
++                "endpoint_rmse": rmse,
++                "compile_and_first_seconds": compile_seconds,
++                "median_batch_seconds": median_seconds,
++                "median_seconds_per_path": median_seconds / args.num_paths,
++                "signature_preprocessing_seconds": preprocessing_seconds,
++                "num_paths": args.num_paths,
++            }
++            rows.append(row)
++            print(
++                f"{method:10s} steps={2**exponent:5d} "
++                f"rmse={rmse:.4e} "
++                f"steady={median_seconds / args.num_paths:.4e}s/path"
++            )
++
++    write_csv(rows, args.csv)
++    plot_results(rows, args.plot)
++    print(f"wrote {args.csv}")
++    print(f"wrote {args.plot}")
++    print(f"HMSigRK3 stages for d=2: {HMSigRK3.num_stages(2)}")
++
++
++if __name__ == "__main__":
++    main()
+diff -ruN a/roughrax/__init__.py b/roughrax/__init__.py
+--- a/roughrax/__init__.py	2026-07-24 14:07:58.254661334 +0000
++++ b/roughrax/__init__.py	2026-07-24 14:07:58.254661334 +0000
+@@ -1,7 +1,8 @@
+-from roughrax._solver import LinearFer, LinearMagnus, LogODE
++from roughrax._solver import HMSigRK3, LinearFer, LinearMagnus, LogODE
+ from roughrax._term import RoughTerm, SignatureInterpolation
+ 
+ __all__ = [
++    "HMSigRK3",
+     "LinearFer",
+     "LinearMagnus",
+     "LogODE",
+diff -ruN a/roughrax/_solver/__init__.py b/roughrax/_solver/__init__.py
+--- a/roughrax/_solver/__init__.py	2026-07-24 14:07:58.254661334 +0000
++++ b/roughrax/_solver/__init__.py	2026-07-24 14:07:58.258661334 +0000
+@@ -1,4 +1,5 @@
++from roughrax._solver.hm_sigrk import HMSigRK3
+ from roughrax._solver.linear import LinearFer, LinearMagnus
+ from roughrax._solver.log_ode import LogODE
+ 
+-__all__ = ["LinearFer", "LinearMagnus", "LogODE"]
++__all__ = ["HMSigRK3", "LinearFer", "LinearMagnus", "LogODE"]
+diff -ruN a/roughrax/_solver/hm_sigrk.py b/roughrax/_solver/hm_sigrk.py
+--- a/roughrax/_solver/hm_sigrk.py	1970-01-01 00:00:00.000000000 +0000
++++ b/roughrax/_solver/hm_sigrk.py	2026-07-24 14:07:58.258661334 +0000
+@@ -0,0 +1,429 @@
++from __future__ import annotations
++
++from collections import defaultdict
++from collections.abc import Callable
++from functools import cache
++from itertools import product
++from typing import ClassVar
++
++import jax
++import jax.numpy as jnp
++import numpy as np
++from diffrax import (
++    AbstractStratonovichSolver,
++    LocalLinearInterpolation,
++    RESULTS,
++)
++from georax import Euclidean
++
++from roughrax._bases import make_lyndon_basis
++from roughrax._term import RoughTerm, unwrap_rough_term
++
++
++def _validate_term(term: RoughTerm) -> None:
++    if not isinstance(term.geometry, Euclidean):
++        raise NotImplementedError(
++            "HMSigRK3 currently supports Euclidean state spaces only. "
++            "Use LogODE with a geometric inner solver on manifolds."
++        )
++    if term.control.solution != "stratonovich":
++        raise ValueError(
++            "HMSigRK3 requires a geometric/Stratonovich signature. "
++            "It does not currently implement branched Itô order conditions."
++        )
++    if term.basis.kind != "lyndon":
++        raise ValueError("HMSigRK3 requires Lyndon log-signature coordinates.")
++    if term.basis.depth < 3:
++        raise ValueError("HMSigRK3 requires SignatureInterpolation(depth >= 3).")
++
++    degree_three_basis = make_lyndon_basis(3, term.basis.dim)
++    size = len(degree_three_basis.keys)
++    if term.basis.keys[:size] != degree_three_basis.keys:
++        raise ValueError(
++            "HMSigRK3 expects PySigLib method-1 Lyndon-word ordering through "
++            "degree three."
++        )
++
++
++def _normalise_vector_fields(term: RoughTerm, y):
++    """Return ``(driver_dimension, *y.shape)`` stacked vector fields."""
++    fields = jnp.asarray(term.vector_field(y))
++    dimension = term.basis.dim
++    leading_shape = (dimension, *jnp.shape(y))
++    trailing_shape = (*jnp.shape(y), dimension)
++
++    if fields.shape == trailing_shape and fields.shape != leading_shape:
++        fields = jnp.moveaxis(fields, -1, 0)
++    if fields.shape != leading_shape:
++        raise ValueError(
++            "vector_field(y) must have shape "
++            f"{leading_shape} (fields on the leading axis) or "
++            f"{trailing_shape} (fields on the trailing axis); got {fields.shape}."
++        )
++    return fields
++
++
++@cache
++def _quadratic_cloud_data(dimension: int):
++    eye = np.eye(dimension)
++    pairs = tuple(
++        (left, right)
++        for left in range(dimension)
++        for right in range(left + 1, dimension)
++    )
++    pair_nodes = (
++        np.stack([eye[left] + eye[right] for left, right in pairs])
++        if pairs
++        else np.empty((0, dimension))
++    )
++    cloud = np.concatenate(
++        [
++            np.zeros((1, dimension)),
++            eye,
++            2 * eye,
++            pair_nodes,
++        ],
++        axis=0,
++    )
++    left_indices = np.asarray([left for left, _ in pairs], dtype=np.int32)
++    right_indices = np.asarray([right for _, right in pairs], dtype=np.int32)
++    return cloud, left_indices, right_indices
++
++
++def _quadratic_cloud(dimension: int, dtype):
++    cloud, left_indices, right_indices = _quadratic_cloud_data(dimension)
++    return (
++        jnp.asarray(cloud, dtype=dtype),
++        jnp.asarray(left_indices),
++        jnp.asarray(right_indices),
++    )
++
++
++def _bracket_expansion(left, right):
++    expansion: defaultdict[tuple[int, ...], int] = defaultdict(int)
++    for left_word, left_coefficient in left.items():
++        for right_word, right_coefficient in right.items():
++            coefficient = left_coefficient * right_coefficient
++            expansion[left_word + right_word] += coefficient
++            expansion[right_word + left_word] -= coefficient
++    return {word: value for word, value in expansion.items() if value != 0}
++
++
++def _flat_word_index(word: tuple[int, ...], dimension: int) -> int:
++    offset = sum(dimension**degree for degree in range(1, len(word)))
++    lexical_index = 0
++    for letter in word:
++        lexical_index = dimension * lexical_index + letter
++    return offset + lexical_index
++
++
++@cache
++def _method_one_log_to_tensor_map(dimension: int):
++    """Sparse map from method-1 log coordinates to the expanded tensor log.
++
++    PySigLib method 1 stores the coefficients of the expanded tensor logarithm
++    at Lyndon words. These values are not, in dimensions above two, the
++    coefficients of the standard Lyndon bracket basis. The triangular conversion
++    below first recovers the bracket coefficients and then expands the brackets
++    into words. All nonzero entries through degree three are small integers.
++    """
++    basis = make_lyndon_basis(3, dimension)
++    expansions: list[dict[tuple[int, ...], int]] = []
++
++    for key, child_ids in zip(basis.keys, basis.children, strict=True):
++        if not isinstance(key, tuple):
++            raise TypeError("Lyndon basis keys must be words.")
++        if not child_ids:
++            expansions.append({key: 1})
++        else:
++            left_id, right_id = child_ids
++            expansions.append(
++                _bracket_expansion(expansions[left_id], expansions[right_id])
++            )
++
++    # If u_i is the tensor-log coefficient at the i-th Lyndon word and c_i is
++    # the standard Lyndon-bracket coefficient, then u = M c with unit lower
++    # triangular M. Store every c_i as a sparse integer linear form in u.
++    bracket_coordinates: list[dict[int, int]] = []
++    for index, key in enumerate(basis.keys):
++        if expansions[index].get(key) != 1:
++            raise RuntimeError("Lyndon bracket expansion must have unit diagonal.")
++
++        coordinate: defaultdict[int, int] = defaultdict(int)
++        coordinate[index] = 1
++        for previous in range(index):
++            coefficient = expansions[previous].get(key, 0)
++            if coefficient == 0:
++                continue
++            for input_index, value in bracket_coordinates[previous].items():
++                coordinate[input_index] -= coefficient * value
++        bracket_coordinates.append(
++            {
++                input_index: value
++                for input_index, value in coordinate.items()
++                if value != 0
++            }
++        )
++
++    expanded_coordinates: defaultdict[
++        tuple[int, ...], defaultdict[int, int]
++    ] = defaultdict(lambda: defaultdict(int))
++    for expansion, coordinate in zip(
++        expansions, bracket_coordinates, strict=True
++    ):
++        for word, expansion_coefficient in expansion.items():
++            for input_index, coordinate_coefficient in coordinate.items():
++                expanded_coordinates[word][input_index] += (
++                    expansion_coefficient * coordinate_coefficient
++                )
++
++    output_indices: list[int] = []
++    input_indices: list[int] = []
++    values: list[int] = []
++    for degree in range(1, 4):
++        for word in product(range(dimension), repeat=degree):
++            output_index = _flat_word_index(word, dimension)
++            for input_index, value in sorted(
++                expanded_coordinates[word].items()
++            ):
++                if value != 0:
++                    output_indices.append(output_index)
++                    input_indices.append(input_index)
++                    values.append(value)
++
++    return (
++        np.asarray(output_indices, dtype=np.int32),
++        np.asarray(input_indices, dtype=np.int32),
++        np.asarray(values, dtype=np.int8),
++        len(basis.keys),
++    )
++
++
++def _tensor_signature_level_three(term: RoughTerm, log_signature):
++    """Recover tensor-signature levels one to three in pure JAX."""
++    dimension = term.basis.dim
++    output_indices, input_indices, values, log_size = (
++        _method_one_log_to_tensor_map(dimension)
++    )
++    tensor_size = dimension + dimension**2 + dimension**3
++
++    output_indices = jnp.asarray(output_indices)
++    input_indices = jnp.asarray(input_indices)
++    values = jnp.asarray(values, dtype=log_signature.dtype)
++    expanded_log = jnp.zeros((tensor_size,), dtype=log_signature.dtype)
++    expanded_log = expanded_log.at[output_indices].add(
++        values * log_signature[:log_size][input_indices]
++    )
++
++    level_one_end = dimension
++    level_two_end = level_one_end + dimension**2
++    log_level_one = expanded_log[:level_one_end]
++    log_level_two = expanded_log[level_one_end:level_two_end].reshape(
++        dimension, dimension
++    )
++    log_level_three = expanded_log[level_two_end:].reshape(
++        dimension, dimension, dimension
++    )
++
++    level_one = log_level_one
++    level_two = log_level_two + 0.5 * jnp.einsum(
++        "i,j->ij", log_level_one, log_level_one
++    )
++    level_three = log_level_three
++    level_three = level_three + 0.5 * jnp.einsum(
++        "i,jk->ijk", log_level_one, log_level_two
++    )
++    level_three = level_three + 0.5 * jnp.einsum(
++        "ij,k->ijk", log_level_two, log_level_one
++    )
++    level_three = level_three + (1.0 / 6.0) * jnp.einsum(
++        "i,j,k->ijk", log_level_one, log_level_one, log_level_one
++    )
++    return level_one, level_two, level_three
++
++
++def _moment_weights(level_one, level_two, level_three):
++    """Build the homogeneous quadratic-cloud weights for every root field."""
++    dimension = level_one.shape[0]
++    cloud, pair_left, pair_right = _quadratic_cloud(
++        dimension, level_one.dtype
++    )
++
++    rho = jnp.maximum(
++        jnp.max(jnp.abs(level_one)),
++        jnp.maximum(
++            jnp.sqrt(jnp.max(jnp.abs(level_two))),
++            jnp.cbrt(jnp.max(jnp.abs(level_three))),
++        ),
++    )
++    safe_rho = jnp.where(rho > 0, rho, jnp.ones_like(rho))
++
++    beta = jnp.cbrt(jnp.max(jnp.abs(level_three), axis=(0, 1)))
++    safe_beta = jnp.where(beta > 0, beta, jnp.ones_like(beta))
++
++    # zeta[root, field] is the degree-zero row sum of the carrier stage.
++    zeta = jnp.einsum("qlk->kl", level_three) / (
++        safe_beta[:, None] * safe_rho**2
++    )
++
++    mu_zero = (level_one - beta) / safe_rho
++    mu_one = jnp.swapaxes(level_two, 0, 1) / safe_rho**2
++    mu_one = mu_one - (beta / safe_rho)[:, None] * zeta
++
++    symmetric_level_three = jnp.transpose(level_three, (2, 0, 1))
++    symmetric_level_three = symmetric_level_three + jnp.transpose(
++        level_three, (2, 1, 0)
++    )
++    mu_two = symmetric_level_three / safe_rho**3
++    mu_two = mu_two - (beta / safe_rho)[:, None, None] * jnp.einsum(
++        "kl,km->klm", zeta, zeta
++    )
++
++    diagonal = jnp.diagonal(mu_two, axis1=1, axis2=2)
++    twice_axis_weights = 0.5 * (diagonal - mu_one)
++    axis_weights = (
++        2 * mu_one
++        - diagonal
++        - (jnp.sum(mu_two, axis=2) - diagonal)
++    )
++
++    if pair_left.size:
++        pair_weights = mu_two[:, pair_left, pair_right]
++        pair_sum = jnp.sum(pair_weights, axis=1)
++    else:
++        pair_weights = jnp.empty((dimension, 0), dtype=level_one.dtype)
++        pair_sum = jnp.zeros((dimension,), dtype=level_one.dtype)
++
++    origin_weight = (
++        mu_zero
++        - 1.5 * jnp.sum(mu_one, axis=1)
++        + 0.5 * jnp.sum(diagonal, axis=1)
++        + pair_sum
++    )
++
++    # omega[stage, root] follows the same ordering as ``cloud``:
++    # 0, e_l, 2 e_l, and e_l + e_m for l < m.
++    omega = jnp.concatenate(
++        [
++            origin_weight[None, :],
++            jnp.swapaxes(axis_weights, 0, 1),
++            jnp.swapaxes(twice_axis_weights, 0, 1),
++            jnp.swapaxes(pair_weights, 0, 1),
++        ],
++        axis=0,
++    )
++    return cloud, omega, rho, safe_rho, beta, safe_beta
++
++
++def _hm_sigrk3_step(term: RoughTerm, log_signature, y0):
++    level_one, level_two, level_three = _tensor_signature_level_three(
++        term, log_signature
++    )
++    dimension = term.basis.dim
++    cloud, omega, rho, safe_rho, beta, safe_beta = _moment_weights(
++        level_one, level_two, level_three
++    )
++
++    fields_at_origin = _normalise_vector_fields(term, y0)
++    core_displacements = jnp.tensordot(cloud, fields_at_origin, axes=1)
++    core_stages = y0 + rho * core_displacements
++
++    def fields_at(y):
++        return _normalise_vector_fields(term, y)
++
++    fields_at_nonzero_core_stages = jax.vmap(fields_at)(core_stages[1:])
++    fields_at_core_stages = jnp.concatenate(
++        [fields_at_origin[None, ...], fields_at_nonzero_core_stages], axis=0
++    )
++    core_increment = rho * jnp.tensordot(
++        omega,
++        fields_at_core_stages,
++        axes=([0, 1], [0, 1]),
++    )
++
++    # The e_q stages occupy positions 1, ..., dimension in the quadratic cloud.
++    fields_at_axis_stages = fields_at_core_stages[1 : 1 + dimension]
++    carrier_coefficients = jnp.transpose(level_three, (2, 0, 1)) / (
++        safe_beta[:, None, None] * safe_rho
++    )
++    carrier_displacements = jnp.tensordot(
++        carrier_coefficients,
++        fields_at_axis_stages,
++        axes=([1, 2], [0, 1]),
++    )
++    carrier_stages = y0 + carrier_displacements
++    fields_at_carrier_stages = jax.vmap(fields_at)(carrier_stages)
++    carrier_diagonal = fields_at_carrier_stages[
++        jnp.arange(dimension), jnp.arange(dimension)
++    ]
++    beta_shape = (dimension,) + (1,) * len(jnp.shape(y0))
++    carrier_increment = jnp.sum(
++        jnp.reshape(beta, beta_shape) * carrier_diagonal,
++        axis=0,
++    )
++
++    return y0 + core_increment + carrier_increment
++
++
++class HMSigRK3(AbstractStratonovichSolver[None]):
++    r"""Experimental third-order homogeneous moment-completion SigRK method.
++
++    ``HMSigRK3`` is an explicit, derivative-free solver for Euclidean geometric
++    rough differential equations. It reconstructs tensor-signature levels one
++    to three from the method-1 Lyndon-word log-signature supplied by
++    :class:`roughrax.SignatureInterpolation`. It then matches the one-node,
++    chain, and cherry B-series moments with a homogeneous quadratic cloud and
++    one carrier stage per driver coordinate.
++
++    The method uses
++
++    .. math::
++
++        \frac{(d + 1)(d + 2)}{2} + d
++
++    vector-field evaluations for a ``d``-dimensional driver. All stage
++    displacements and update coefficients are at the intrinsic rough scale.
++    There are no derivative quotients, opposite probes, or prescribed
++    ``sqrt(h)`` and ``1/sqrt(h)`` coefficient pairs.
++
++    Notes:
++        - Use ``SignatureInterpolation(depth=3, solution="stratonovich")``.
++          Larger depths are accepted, but levels above three are ignored.
++        - Use ``diffrax.StepTo(control.ts)`` so every solver step corresponds to
++          one stored local log-signature.
++        - The current implementation is Euclidean and fixed-step. It supplies
++          no embedded error estimate.
++    """
++
++    term_structure: ClassVar = RoughTerm
++    interpolation_cls: ClassVar[Callable[..., LocalLinearInterpolation]] = (
++        LocalLinearInterpolation
++    )
++
++    @staticmethod
++    def num_stages(driver_dimension: int) -> int:
++        """Number of vector-field evaluations per rough step."""
++        if driver_dimension < 1:
++            raise ValueError("driver_dimension must be positive.")
++        return (
++            (driver_dimension + 1) * (driver_dimension + 2) // 2
++            + driver_dimension
++        )
++
++    def init(self, terms, t0, t1, y0, args) -> None:
++        del t0, t1, y0, args
++        _validate_term(unwrap_rough_term(terms))
++        return None
++
++    def step(self, terms, t0, t1, y0, args, solver_state, made_jump):
++        del args, solver_state, made_jump
++        rough_term = unwrap_rough_term(terms)
++        log_signature = terms.contr(t0, t1)
++        y1 = _hm_sigrk3_step(rough_term, log_signature, y0)
++        return y1, None, dict(y0=y0, y1=y1), None, RESULTS.successful
++
++    def func(self, terms, t0, y0, args):
++        return terms.vf(t0, y0, args)
++
++
++__all__ = ["HMSigRK3"]
+diff -ruN a/tests/test_hm_sigrk.py b/tests/test_hm_sigrk.py
+--- a/tests/test_hm_sigrk.py	1970-01-01 00:00:00.000000000 +0000
++++ b/tests/test_hm_sigrk.py	2026-07-24 14:10:01.850659942 +0000
+@@ -0,0 +1,267 @@
++from __future__ import annotations
++
++import diffrax
++import equinox as eqx
++import jax
++import jax.numpy as jnp
++import pytest
++from georax import Euclidean
++
++from roughrax import HMSigRK3, RoughTerm, SignatureInterpolation
++
++
++jax.config.update("jax_enable_x64", True)
++
++
++_BASE_INCREMENTS = jnp.asarray(
++    [
++        [0.7, -0.2],
++        [-0.4, 0.6],
++        [0.2, 0.1],
++    ],
++    dtype=jnp.float64,
++)
++
++
++def _rough_vector_field(y):
++    return jnp.stack([jnp.cos(y), jnp.sin(y)])
++
++
++def _control_vector_field(t, y, args):
++    del t, args
++    return _rough_vector_field(y)
++
++
++def _scaled_path(scale):
++    increments = scale * _BASE_INCREMENTS
++    return jnp.concatenate(
++        [jnp.zeros((1, 2), dtype=increments.dtype), jnp.cumsum(increments, axis=0)]
++    )
++
++
++def _solve_hm(path, y0):
++    fine_ts = jnp.linspace(0.0, 1.0, path.shape[0])
++    signature_knots = jnp.asarray([0.0, 1.0], dtype=fine_ts.dtype)
++    driver = diffrax.LinearInterpolation(ts=fine_ts, ys=path)
++    control = SignatureInterpolation(
++        driver,
++        signature_knots,
++        depth=3,
++        solution="stratonovich",
++    )
++    term = RoughTerm(_rough_vector_field, control, Euclidean())
++    sol = diffrax.diffeqsolve(
++        term,
++        HMSigRK3(),
++        t0=signature_knots[0],
++        t1=signature_knots[-1],
++        dt0=None,
++        y0=y0,
++        stepsize_controller=diffrax.StepTo(signature_knots),
++        saveat=diffrax.SaveAt(t1=True),
++        max_steps=4,
++    )
++    return sol.ys[-1]
++
++
++def _solve_reference(path, y0):
++    ts = jnp.linspace(0.0, 1.0, path.shape[0])
++    term = diffrax.ControlTerm(
++        _control_vector_field,
++        diffrax.LinearInterpolation(ts=ts, ys=path),
++    )
++    sol = diffrax.diffeqsolve(
++        term,
++        diffrax.Dopri8(),
++        t0=ts[0],
++        t1=ts[-1],
++        dt0=None,
++        y0=y0,
++        stepsize_controller=diffrax.StepTo(ts),
++        saveat=diffrax.SaveAt(t1=True),
++        max_steps=ts.shape[0] + 4,
++    )
++    return sol.ys[-1]
++
++
++def test_hm_sigrk3_has_fourth_order_local_remainder():
++    y0 = jnp.asarray(0.25, dtype=jnp.float64)
++    scales = (0.5, 0.25, 0.125)
++    errors = []
++    for scale in scales:
++        path = _scaled_path(scale)
++        errors.append(
++            float(jnp.abs(_solve_hm(path, y0) - _solve_reference(path, y0)))
++        )
++
++    assert errors[0] / errors[1] > 10.0
++    assert errors[1] / errors[2] > 10.0
++
++
++def test_hm_sigrk3_is_filter_jit_safe():
++    @eqx.filter_jit
++    def solve(path, y0):
++        return _solve_hm(path, y0)
++
++    y1 = solve(_scaled_path(0.25), jnp.asarray(0.25, dtype=jnp.float64))
++    assert y1.shape == ()
++    assert jnp.isfinite(y1)
++
++
++def test_hm_sigrk3_is_exact_for_constant_vector_fields():
++    constant_fields = jnp.asarray([1.2, -0.7], dtype=jnp.float64)
++
++    def vector_field(y):
++        del y
++        return constant_fields
++
++    path = _scaled_path(0.5)
++    fine_ts = jnp.linspace(0.0, 1.0, path.shape[0])
++    signature_knots = jnp.asarray([0.0, 1.0], dtype=fine_ts.dtype)
++    control = SignatureInterpolation(
++        diffrax.LinearInterpolation(ts=fine_ts, ys=path),
++        signature_knots,
++        depth=3,
++        solution="stratonovich",
++    )
++    term = RoughTerm(vector_field, control, Euclidean())
++    y0 = jnp.asarray(-0.3, dtype=jnp.float64)
++    sol = diffrax.diffeqsolve(
++        term,
++        HMSigRK3(),
++        t0=signature_knots[0],
++        t1=signature_knots[-1],
++        dt0=None,
++        y0=y0,
++        stepsize_controller=diffrax.StepTo(signature_knots),
++        saveat=diffrax.SaveAt(t1=True),
++        max_steps=4,
++    )
++    expected = y0 + jnp.dot(path[-1] - path[0], constant_fields)
++    assert jnp.allclose(sol.ys[-1], expected, rtol=1e-11, atol=1e-11)
++
++
++def test_hm_sigrk3_rejects_insufficient_depth():
++    path = _scaled_path(0.25)
++    ts = jnp.linspace(0.0, 1.0, path.shape[0])
++    knots = jnp.asarray([0.0, 1.0], dtype=ts.dtype)
++    control = SignatureInterpolation(
++        diffrax.LinearInterpolation(ts=ts, ys=path),
++        knots,
++        depth=2,
++        solution="stratonovich",
++    )
++    term = RoughTerm(_rough_vector_field, control, Euclidean())
++    with pytest.raises(ValueError, match="depth >= 3"):
++        HMSigRK3().init(term, knots[0], knots[-1], jnp.asarray(0.25), None)
++
++
++def test_hm_sigrk3_stage_count():
++    assert HMSigRK3.num_stages(1) == 4
++    assert HMSigRK3.num_stages(2) == 8
++    assert HMSigRK3.num_stages(3) == 13
++    with pytest.raises(ValueError, match="positive"):
++        HMSigRK3.num_stages(0)
++
++
++def test_method_one_log_coordinates_reconstruct_tensor_signature():
++    import pysiglib.jax_api as pysiglib
++
++    path = jnp.asarray(
++        [
++            [0.0, 0.0, 0.0],
++            [0.3, -0.2, 0.4],
++            [-0.1, 0.5, 0.2],
++            [0.4, 0.1, -0.3],
++        ],
++        dtype=jnp.float64,
++    )
++    ts = jnp.linspace(0.0, 1.0, path.shape[0])
++    knots = jnp.asarray([0.0, 1.0], dtype=path.dtype)
++
++    def vector_field(y):
++        return jnp.stack(
++            [
++                jnp.cos(y),
++                jnp.sin(y),
++                1.0 + 0.25 * jnp.tanh(y),
++            ]
++        )
++
++    control = SignatureInterpolation(
++        diffrax.LinearInterpolation(ts=ts, ys=path),
++        knots,
++        depth=3,
++        solution="stratonovich",
++    )
++    term = RoughTerm(vector_field, control, Euclidean())
++
++    from roughrax._solver.hm_sigrk import _tensor_signature_level_three
++
++    levels = _tensor_signature_level_three(term, term.control.coeffs[0])
++    reconstructed = jnp.concatenate(
++        [levels[0].reshape(-1), levels[1].reshape(-1), levels[2].reshape(-1)]
++    )
++    direct = pysiglib.sig(path, degree=3, scalar_term=False)
++    assert jnp.allclose(reconstructed, direct, rtol=1e-11, atol=1e-11)
++
++
++def test_moment_completion_satisfies_order_three_conditions():
++    from roughrax._solver.hm_sigrk import _moment_weights
++
++    level_one = jnp.asarray([0.2, -0.3, 0.1], dtype=jnp.float64)
++    level_two = jnp.asarray(
++        [
++            [0.04, 0.05, -0.02],
++            [-0.01, 0.09, 0.03],
++            [0.02, -0.04, 0.01],
++        ],
++        dtype=jnp.float64,
++    )
++    level_three = jnp.arange(27, dtype=jnp.float64).reshape(3, 3, 3)
++    level_three = 0.001 * (level_three - 13.0)
++
++    cloud, omega, rho, safe_rho, beta, safe_beta = _moment_weights(
++        level_one, level_two, level_three
++    )
++    zeta = jnp.einsum("qlk->kl", level_three) / (
++        safe_beta[:, None] * safe_rho**2
++    )
++
++    order_one = rho * jnp.sum(omega, axis=0) + beta
++    order_two = rho**2 * jnp.einsum("ik,il->kl", omega, cloud)
++    order_two = order_two + beta[:, None] * rho * zeta
++    order_three_cherry = rho**3 * jnp.einsum(
++        "ik,il,im->klm", omega, cloud, cloud
++    )
++    order_three_cherry = order_three_cherry + (
++        beta[:, None, None]
++        * rho**2
++        * jnp.einsum("kl,km->klm", zeta, zeta)
++    )
++    carrier_coefficients = jnp.transpose(level_three, (2, 0, 1)) / (
++        safe_beta[:, None, None] * safe_rho
++    )
++    order_three_chain = (
++        beta[:, None, None]
++        * rho
++        * jnp.transpose(carrier_coefficients, (0, 2, 1))
++    )
++
++    expected_order_two = jnp.swapaxes(level_two, 0, 1)
++    expected_chain = jnp.transpose(level_three, (2, 1, 0))
++    expected_cherry = jnp.transpose(level_three, (2, 0, 1))
++    expected_cherry = expected_cherry + jnp.transpose(
++        level_three, (2, 1, 0)
++    )
++
++    assert jnp.allclose(order_one, level_one, rtol=1e-12, atol=1e-12)
++    assert jnp.allclose(
++        order_two, expected_order_two, rtol=1e-12, atol=1e-12
++    )
++    assert jnp.allclose(
++        order_three_chain, expected_chain, rtol=1e-12, atol=1e-12
++    )
++    assert jnp.allclose(
++        order_three_cherry, expected_cherry, rtol=1e-12, atol=1e-12
++    )
