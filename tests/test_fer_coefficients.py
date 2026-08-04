@@ -67,7 +67,7 @@ def test_depth6_fer_product_agrees_with_magnus_through_degree6():
 
 
 class _RightLinearVectorField:
-    matrices = jnp.asarray(
+    matrix_basis = jnp.asarray(
         [
             [[0.0, 1.0], [-1.0, 0.0]],
             [[0.2, -0.3], [0.4, 0.1]],
@@ -75,10 +75,7 @@ class _RightLinearVectorField:
     )
 
     def __call__(self, y):
-        return jnp.stack([y @ matrix for matrix in self.matrices])
-
-    def matrix_basis(self):
-        return self.matrices
+        return jnp.stack([y @ matrix for matrix in self.matrix_basis])
 
 
 def _solve_precomputed(depth):

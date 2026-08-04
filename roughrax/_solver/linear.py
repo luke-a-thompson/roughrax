@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import Literal
 
 import equinox as eqx
-import jax
 import jax.numpy as jnp
 import jax.scipy.linalg as jsl
 from diffrax import AbstractLocalInterpolation, AbstractSolver, RESULTS
@@ -59,66 +58,38 @@ def _build_lyndon_matrix_basis(
     return jnp.stack([build(index) for index in range(len(basis.keys))])
 
 
-def _infer_level_one_matrices(rough_term: RoughTerm, y0: Array) -> Array:
-    if y0.ndim != 2 or y0.shape[0] != y0.shape[1]:
-        raise ValueError(
-            "Linear solvers can infer matrices only from square matrix states. "
-            "For other state shapes, attach a `matrix_basis` array to the "
-            "vector field."
-        )
-    identity = jnp.eye(y0.shape[0], dtype=y0.dtype)
-    values = jnp.asarray(rough_term.vector_field(identity), dtype=y0.dtype)
-    if values.shape == (rough_term.basis.dim, *identity.shape):
-        return values
-    if values.shape == (*identity.shape, rough_term.basis.dim):
-        return jnp.moveaxis(values, -1, 0)
-    raise ValueError(
-        "Could not infer level-one matrices from vector_field(I). Expected shape "
-        f"{(rough_term.basis.dim, *identity.shape)} or "
-        f"{(*identity.shape, rough_term.basis.dim)}, got {values.shape}."
-    )
-
-
 def _matrix_basis(rough_term: RoughTerm, y0: Array, side: Side) -> Array:
     matrix_basis = getattr(rough_term.vector_field, "matrix_basis", None)
-    if matrix_basis is None:
-        matrices = _infer_level_one_matrices(rough_term, y0)
-    else:
-        matrices = matrix_basis() if callable(matrix_basis) else matrix_basis
-        matrices = jnp.asarray(matrices, dtype=y0.dtype)
-
-    if matrices.ndim != 3 or matrices.shape[-1] != matrices.shape[-2]:
+    if matrix_basis is None or callable(matrix_basis):
         raise ValueError(
-            "matrix_basis must have shape (basis_size, matrix_dim, matrix_dim), "
+            "Linear vector fields must expose a `matrix_basis` array with shape "
+            "(driver_dim, matrix_dim, matrix_dim)."
+        )
+    matrices = jnp.asarray(matrix_basis, dtype=y0.dtype)
+
+    if (
+        matrices.ndim != 3
+        or matrices.shape[0] != rough_term.basis.dim
+        or matrices.shape[-1] != matrices.shape[-2]
+    ):
+        raise ValueError(
+            "matrix_basis must have shape "
+            f"({rough_term.basis.dim}, matrix_dim, matrix_dim), "
             f"got {matrices.shape}."
         )
-    if matrices.shape[0] == rough_term.basis.dim:
-        return _build_lyndon_matrix_basis(matrices, rough_term.basis, side)
-    if matrices.shape[0] == len(rough_term.basis.keys):
-        return matrices
-    raise ValueError(
-        "matrix_basis leading dimension must be either the driver dimension "
-        f"{rough_term.basis.dim} or the log-signature dimension "
-        f"{len(rough_term.basis.keys)}, got {matrices.shape[0]}."
-    )
+    return _build_lyndon_matrix_basis(matrices, rough_term.basis, side)
 
 
 def _contract(coeffs: Array, matrices: Array) -> Array:
     return jnp.tensordot(coeffs, matrices, axes=1)
 
 
+def _apply_matrix(y: Array, matrix: Array, side: Side) -> Array:
+    return y @ matrix if side == "right" else matrix @ y
+
+
 def _apply_generator(y: Array, generator: Array, side: Side) -> Array:
-    exp_generator = jsl.expm(generator)
-    return y @ exp_generator if side == "right" else exp_generator @ y
-
-
-def _apply_generator_from_bool(y: Array, generator: Array, right: Array) -> Array:
-    exp_generator = jsl.expm(generator)
-    return jax.lax.cond(
-        right,
-        lambda: y @ exp_generator,
-        lambda: exp_generator @ y,
-    )
+    return _apply_matrix(y, jsl.expm(generator), side)
 
 
 class _LinearMagnusInterpolation(AbstractLocalInterpolation):
@@ -126,7 +97,7 @@ class _LinearMagnusInterpolation(AbstractLocalInterpolation):
     t1: Array
     y0: Array
     omega: Array
-    right: Array
+    side: Side = eqx.field(static=True)
 
     def evaluate(self, t0, t1=None, left: bool = True):
         del left
@@ -134,30 +105,23 @@ class _LinearMagnusInterpolation(AbstractLocalInterpolation):
             return self.evaluate(t1) - self.evaluate(t0)
 
         u = (t0 - self.t0) / (self.t1 - self.t0)
-        return _apply_generator_from_bool(self.y0, u * self.omega, self.right)
+        return _apply_generator(self.y0, u * self.omega, self.side)
 
 
-def _apply_fer_factors(y0: Array, factors: Array, u: Array, right: Array) -> Array:
-    num_factors = factors.shape[0]
-    progress = u * num_factors
-    fractions = jnp.clip(progress - jnp.arange(num_factors), 0.0, 1.0)
+def _apply_factor_product(y0: Array, factors: Array, side: Side) -> Array:
     eye = jnp.eye(factors.shape[-1], dtype=factors.dtype)
     product = eye
-    for fraction, factor in zip(fractions, factors, strict=True):
-        product = product @ jsl.expm(fraction * factor)
-    return jax.lax.cond(
-        right,
-        lambda: y0 @ product,
-        lambda: product @ y0,
-    )
+    for factor in factors:
+        product = product @ jsl.expm(factor)
+    return _apply_matrix(y0, product, side)
 
 
 class _LinearFerInterpolation(AbstractLocalInterpolation):
     t0: Array
     t1: Array
     y0: Array
-    factors: Array
-    right: Array
+    components: Array
+    side: Side = eqx.field(static=True)
 
     def evaluate(self, t0, t1=None, left: bool = True):
         del left
@@ -165,7 +129,8 @@ class _LinearFerInterpolation(AbstractLocalInterpolation):
             return self.evaluate(t1) - self.evaluate(t0)
 
         u = (t0 - self.t0) / (self.t1 - self.t0)
-        return _apply_fer_factors(self.y0, self.factors, u, self.right)
+        factors = _fer_factors([u * component for component in self.components])
+        return _apply_factor_product(self.y0, factors, self.side)
 
 
 def _degree_components(
@@ -232,7 +197,7 @@ class LinearMagnus(AbstractSolver[None]):
         dense_info = dict(
             y0=y0,
             omega=omega,
-            right=jnp.asarray(self.side == "right"),
+            side=self.side,
         )
         return y1, None, dense_info, None, RESULTS.successful
 
@@ -267,22 +232,11 @@ class LinearFer(AbstractSolver[None]):
         matrices = _matrix_basis(rough_term, y0, self.side)
         components = _degree_components(terms.contr(t0, t1), matrices, rough_term.basis)
         factors = _fer_factors(components)
-
-        y = y0
-        if self.side == "right":
-            for factor in factors:
-                y = y @ jsl.expm(factor)
-        else:
-            y = _apply_fer_factors(
-                y0,
-                factors,
-                jnp.asarray(1.0, dtype=factors.dtype),
-                jnp.asarray(False),
-            )
+        y = _apply_factor_product(y0, factors, self.side)
         dense_info = dict(
             y0=y0,
-            factors=factors,
-            right=jnp.asarray(self.side == "right"),
+            components=jnp.stack(components),
+            side=self.side,
         )
         return y, None, dense_info, None, RESULTS.successful
 

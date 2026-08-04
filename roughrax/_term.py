@@ -82,7 +82,8 @@ class SignatureInterpolation(AbstractPath):
         ``coeffs[i]`` must be the log-signature over ``[ts[i], ts[i + 1]]``.
         Its shape must be ``(num_intervals, *batch_shape, logsig_dim)``. The
         final coefficient axis follows ``pysiglib.lyndon_words`` ordering and
-        does not include a scalar term.
+        does not include a scalar term. Generic ``LogODE`` solves should vmap
+        over batch dimensions; the linear solvers support them directly.
         """
         if solution != "stratonovich":
             raise ValueError(
@@ -105,8 +106,7 @@ class SignatureInterpolation(AbstractPath):
 
         if ts.ndim != 1:
             raise ValueError(
-                "ts must have shape (num_intervals + 1,), "
-                f"got {ts.shape}."
+                f"ts must have shape (num_intervals + 1,), got {ts.shape}."
             )
         if ts.shape[0] < 2:
             raise ValueError("ts must contain at least two points.")
@@ -158,9 +158,11 @@ class SignatureInterpolation(AbstractPath):
                 "precomputed coefficients."
             )
 
-        control_ts = getattr(self.control, "ts")
+        control_ts = jnp.asarray(getattr(self.control, "ts"))
         ys = jnp.asarray(getattr(self.control, "ys"))
         dim = int(ys.shape[-1])
+        if self.ts.ndim != 1:
+            raise ValueError("signature_knots must be one-dimensional.")
         num_intervals = self.ts.shape[0] - 1
         num_control_intervals = control_ts.shape[0] - 1
         if num_intervals < 1:
@@ -171,6 +173,15 @@ class SignatureInterpolation(AbstractPath):
             )
 
         stride = num_control_intervals // num_intervals
+        expected_knots = control_ts[::stride]
+        signature_knots = eqx.error_if(
+            self.ts,
+            (~jnp.isfinite(self.ts)).any()
+            | (self.ts[1:] <= self.ts[:-1]).any()
+            | (self.ts != expected_knots).any(),
+            "signature_knots must be finite, strictly increasing, and equal "
+            "control.ts[::stride].",
+        )
         windows = jnp.stack(
             [ys[j * stride : (j + 1) * stride + 1] for j in range(num_intervals)]
         )
@@ -199,7 +210,7 @@ class SignatureInterpolation(AbstractPath):
 
         out = SignatureInterpolation(
             self.control,
-            self.ts,
+            signature_knots,
             self.depth,
             self.solution,
             correction=self.correction,
@@ -214,7 +225,20 @@ class SignatureInterpolation(AbstractPath):
             raise ValueError("SignatureInterpolation must be materialised first.")
         if t1 is None:
             return self._evaluate(t0)
-        return self._evaluate(t1) - self._evaluate(t0)
+        lower = jnp.minimum(t0, t1)
+        upper = jnp.maximum(t0, t1)
+        index = jnp.searchsorted(self.ts, lower, side="right") - 1
+        index = jnp.clip(index, 0, self.coeffs.shape[0] - 1)
+        denominator = self.ts[index + 1] - self.ts[index]
+        fraction0 = (t0 - self.ts[index]) / denominator
+        fraction1 = (t1 - self.ts[index]) / denominator
+        increment = (fraction1 - fraction0) * self.coeffs[index]
+        return eqx.error_if(
+            increment,
+            upper > self.ts[index + 1],
+            "SignatureInterpolation intervals may not cross signature knots; "
+            "clip solver steps at the signature knots.",
+        )
 
     def _evaluate(self, t):
         assert self.coeffs is not None
@@ -238,6 +262,7 @@ class RoughTerm(AbstractTerm[Array, Array]):
     control: SignatureInterpolation
     basis: PrimitiveBasis = eqx.field(static=True)
     lifted_fields: tuple[LiftedField, ...] = eqx.field(static=True)
+    has_lifted_vector_field: bool = eqx.field(static=True)
     geometry: Manifold[Any] = Euclidean()
 
     def __init__(
@@ -245,6 +270,8 @@ class RoughTerm(AbstractTerm[Array, Array]):
         vector_field: VectorField,
         control: SignatureInterpolation,
         geometry: Manifold[Any] = Euclidean(),
+        *,
+        _has_lifted_vector_field: bool = False,
     ):
         if not isinstance(control, SignatureInterpolation):
             raise TypeError("RoughTerm control must be a SignatureInterpolation.")
@@ -255,31 +282,55 @@ class RoughTerm(AbstractTerm[Array, Array]):
         self.control = control
         self.basis = control.basis
         self.geometry = geometry
-        self.lifted_fields = form_pseudo_bialgebra_map(
-            vector_field, control.basis, geometry
+        self.has_lifted_vector_field = _has_lifted_vector_field
+        self.lifted_fields = (
+            ()
+            if _has_lifted_vector_field
+            else form_pseudo_bialgebra_map(vector_field, control.basis, geometry)
+        )
+
+    @classmethod
+    def from_lifted_vector_field(
+        cls,
+        vector_field: VectorField,
+        control: SignatureInterpolation,
+        geometry: Manifold[Any] = Euclidean(),
+    ) -> RoughTerm:
+        """Construct from a field returning all log-signature columns."""
+        return cls(
+            vector_field,
+            control,
+            geometry,
+            _has_lifted_vector_field=True,
         )
 
     def vf(self, t, y, args):
         del t, args
-        fields = jnp.asarray(self.vector_field(y))
-        logsig_size = len(self.basis.keys)
-        columns_shape = (*jnp.shape(y), logsig_size)
-        base_shape = (self.basis.dim, *jnp.shape(y))
-        if fields.shape == columns_shape and fields.shape != base_shape:
-            return jnp.moveaxis(fields, -1, 0)
-        if (
-            fields.ndim == 1
-            and fields.size == jnp.size(y) * logsig_size
-            and fields.shape != base_shape
-        ):
-            columns = jnp.reshape(fields, columns_shape)
-            return jnp.moveaxis(columns, -1, 0)
+        if self.has_lifted_vector_field:
+            fields = jnp.asarray(self.vector_field(y))
+            logsig_size = len(self.basis.keys)
+            columns_shape = (*jnp.shape(y), logsig_size)
+            if fields.shape == columns_shape:
+                return jnp.moveaxis(fields, -1, 0)
+            if fields.ndim == 1 and fields.size == jnp.size(y) * logsig_size:
+                columns = jnp.reshape(fields, columns_shape)
+                return jnp.moveaxis(columns, -1, 0)
+            raise ValueError(
+                "A lifted vector field must return shape "
+                f"{columns_shape} or a flat array of the same size, got "
+                f"{fields.shape}."
+            )
         return jnp.stack([field(y) for field in self.lifted_fields])
 
     def contr(self, t0, t1, **kwargs):
         return self.control.evaluate(t0, t1, **kwargs)
 
     def prod(self, vf, control):
+        if control.ndim != 1:
+            raise ValueError(
+                "Batched controls are not supported by generic RoughTerm; "
+                "use jax.vmap over independent solves."
+            )
         return jnp.tensordot(control, vf, axes=1)
 
     def is_vf_expensive(self, t0, t1, y, args) -> bool:

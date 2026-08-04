@@ -38,7 +38,7 @@ def test_rough_term_accepts_direct_logsig_columns():
     columns = direct_columns(y)
 
     for vector_field in (direct_columns, lambda y: direct_columns(y).reshape(-1)):
-        term = RoughTerm(vector_field, control, Euclidean())
+        term = RoughTerm.from_lifted_vector_field(vector_field, control, Euclidean())
         assert term.vf(0.0, y, None).shape == (coeffs.shape[0],) + y.shape
         assert jnp.allclose(
             term.prod(term.vf(0.0, y, None), coeffs),
@@ -97,6 +97,51 @@ def test_signature_interpolation_evaluates_linearly():
         ),
         0.5 * control.coeffs[0],
     )
+
+
+def test_signature_knots_must_match_regular_control_stride():
+    ts = jnp.linspace(0.0, 1.0, 5)
+    driver = diffrax.LinearInterpolation(ts=ts, ys=(ts**2)[:, None])
+    control = SignatureInterpolation(
+        driver,
+        jnp.asarray([0.0, 0.75, 1.0]),
+        depth=1,
+        solution="stratonovich",
+    )
+
+    with pytest.raises(eqx.EquinoxRuntimeError, match=r"control\.ts\[::stride\]"):
+        control.materialise(Euclidean())
+
+
+def test_signature_intervals_may_not_cross_knots():
+    ts = jnp.asarray([0.0, 1.0, 2.0])
+    control = SignatureInterpolation.from_logsignatures(
+        ts,
+        jnp.asarray([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]),
+        input_dim=2,
+        depth=2,
+    )
+
+    assert jnp.array_equal(control.evaluate(0.0, 1.0), control.coeffs[0])
+    with pytest.raises(eqx.EquinoxRuntimeError, match="may not cross"):
+        control.evaluate(0.0, 2.0)
+
+
+def test_generic_rough_term_rejects_batched_controls():
+    control = SignatureInterpolation.from_logsignatures(
+        jnp.asarray([0.0, 1.0]),
+        jnp.ones((1, 2, 2)),
+        input_dim=2,
+        depth=1,
+    )
+
+    def vector_field(y):
+        return jnp.stack([jnp.ones_like(y), 2 * jnp.ones_like(y)])
+
+    term = RoughTerm(vector_field, control, Euclidean())
+    y = jnp.asarray([0.0, 1.0])
+    with pytest.raises(ValueError, match="jax.vmap"):
+        term.prod(term.vf(0.0, y, None), term.contr(0.0, 1.0))
 
 
 def test_ito_correction_is_forwarded_to_pysiglib():
@@ -161,10 +206,11 @@ def test_from_logsignatures_matches_materialised_control():
     assert control.basis is not None
     assert materialised.basis is not None
     assert control.basis.keys == materialised.basis.keys
-    assert jnp.allclose(
-        control.evaluate(signature_knots[0], signature_knots[-1]),
-        materialised.evaluate(signature_knots[0], signature_knots[-1]),
-    )
+    for t0, t1 in zip(signature_knots[:-1], signature_knots[1:], strict=True):
+        assert jnp.allclose(
+            control.evaluate(t0, t1),
+            materialised.evaluate(t0, t1),
+        )
 
 
 @pytest.mark.parametrize(
@@ -242,7 +288,9 @@ def test_from_logsignatures_is_filter_jit_and_vmap_safe():
                 input_dim=2,
                 depth=2,
             )
-            return control.evaluate(ts[0], ts[-1])
+            return jnp.stack(
+                [control.evaluate(ts[i], ts[i + 1]) for i in range(ts.shape[0] - 1)]
+            )
 
         return jax.vmap(evaluate_one)(coeffs_batch)
 
@@ -254,13 +302,13 @@ def test_from_logsignatures_is_filter_jit_and_vmap_safe():
             input_dim=2,
             depth=2,
         )
-        return control.evaluate(ts[0], ts[-1])
+        return jnp.stack(
+            [control.evaluate(ts[i], ts[i + 1]) for i in range(ts.shape[0] - 1)]
+        )
 
-    assert jnp.allclose(
-        evaluate_population(ts, coeffs_batch), coeffs_batch.sum(axis=1)
-    )
+    assert jnp.allclose(evaluate_population(ts, coeffs_batch), coeffs_batch)
     interval_batched_coeffs = jnp.swapaxes(coeffs_batch, 0, 1)
     assert jnp.allclose(
         evaluate_batched_control(ts, interval_batched_coeffs),
-        interval_batched_coeffs.sum(axis=0),
+        interval_batched_coeffs,
     )

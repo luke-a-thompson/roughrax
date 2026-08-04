@@ -32,20 +32,22 @@ def force_pysiglib_cpu(monkeypatch):
     )
 
 
-def right_linear_vector_field(y):
-    return jnp.stack([y @ matrix for matrix in MATRICES])
+class RightLinearVectorField:
+    matrix_basis = MATRICES
 
-
-def left_linear_vector_field(y):
-    return jnp.stack([matrix @ y for matrix in MATRICES])
-
-
-class RightLinearVectorFieldWithBasis:
     def __call__(self, y):
-        return jnp.stack([y @ matrix for matrix in MATRICES])
+        return jnp.stack([y @ matrix for matrix in self.matrix_basis])
 
-    def matrix_basis(self):
-        return MATRICES
+
+class LeftLinearVectorField:
+    matrix_basis = MATRICES
+
+    def __call__(self, y):
+        return jnp.stack([matrix @ y for matrix in self.matrix_basis])
+
+
+right_linear_vector_field = RightLinearVectorField()
+left_linear_vector_field = LeftLinearVectorField()
 
 
 def _driver(depth):
@@ -169,6 +171,23 @@ def test_linear_fer_log_ode_matches_depth3_product():
     assert jnp.allclose(actual, expected, atol=1e-6, rtol=1e-6)
 
 
+def test_linear_solvers_require_level_one_matrix_basis():
+    class FullBasisVectorField:
+        matrix_basis = jnp.zeros((3, 2, 2))
+
+        def __call__(self, y):
+            return jnp.stack([y @ matrix for matrix in MATRICES])
+
+    def missing_basis(y):
+        return jnp.stack([y @ matrix for matrix in MATRICES])
+
+    control, signature_knots = _driver(depth=2)
+    for vector_field in (missing_basis, FullBasisVectorField()):
+        term = RoughTerm(vector_field, control, Euclidean())
+        with pytest.raises(ValueError, match="matrix_basis"):
+            _solve(term, LinearMagnus(), signature_knots, jnp.eye(2))
+
+
 @pytest.mark.parametrize(
     "solver",
     [LinearMagnus(side="right"), LinearFer(side="right")],
@@ -220,7 +239,7 @@ def test_precomputed_batched_logsignatures_match_materialised_controls(solver):
     assert materialised_controls[0].basis is not None
     assert precomputed_control.basis.keys == materialised_controls[0].basis.keys
 
-    vector_field = RightLinearVectorFieldWithBasis()
+    vector_field = right_linear_vector_field
     y0 = jnp.asarray(
         [
             [[1.0, 0.2], [-0.1, 0.8]],
@@ -290,15 +309,13 @@ def test_linear_magnus_saveat_samples_exact_fake_time():
     matrices = _lyndon_matrix_basis(MATRICES, term.basis, "right")
     coeffs = term.contr(signature_knots[0], signature_knots[-1])
     omega = jnp.tensordot(coeffs, matrices, axes=1)
-    fake_u = (save_ts - signature_knots[0]) / (
-        signature_knots[-1] - signature_knots[0]
-    )
+    fake_u = (save_ts - signature_knots[0]) / (signature_knots[-1] - signature_knots[0])
     expected = jnp.stack([y0 @ jsl.expm(u * omega) for u in fake_u])
 
     assert jnp.allclose(sol.ys, expected, atol=1e-6, rtol=1e-6)
 
 
-def test_linear_fer_saveat_samples_piecewise_fake_time():
+def test_linear_fer_saveat_scales_the_full_generator():
     control, signature_knots = _driver(depth=3)
     term = RoughTerm(right_linear_vector_field, control, Euclidean())
     y0 = jnp.asarray([[0.7, 0.1], [-0.2, 1.2]])
@@ -320,23 +337,20 @@ def test_linear_fer_saveat_samples_piecewise_fake_time():
     components = _omega_components(
         term.contr(signature_knots[0], signature_knots[-1]), matrices, term.basis
     )
-    factors = jnp.stack(
-        [
-            components[0],
-            components[1],
-            components[2] - 0.5 * _commutator(components[0], components[1]),
-        ]
-    )
-    fake_u = (save_ts - signature_knots[0]) / (
-        signature_knots[-1] - signature_knots[0]
-    )
+    fake_u = (save_ts - signature_knots[0]) / (signature_knots[-1] - signature_knots[0])
     expected = []
     for u in fake_u:
-        progress = u * factors.shape[0]
-        fractions = jnp.clip(progress - jnp.arange(factors.shape[0]), 0.0, 1.0)
+        scaled = [u * component for component in components]
+        factors = jnp.stack(
+            [
+                scaled[0],
+                scaled[1],
+                scaled[2] - 0.5 * _commutator(scaled[0], scaled[1]),
+            ]
+        )
         product = jnp.eye(factors.shape[-1], dtype=factors.dtype)
-        for fraction, factor in zip(fractions, factors, strict=True):
-            product = product @ jsl.expm(fraction * factor)
+        for factor in factors:
+            product = product @ jsl.expm(factor)
         expected.append(y0 @ product)
     expected = jnp.stack(expected)
 

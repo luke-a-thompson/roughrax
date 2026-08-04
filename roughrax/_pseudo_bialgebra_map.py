@@ -6,8 +6,7 @@ from math import factorial, prod
 from typing import Any
 
 import jax
-from georax import Manifold
-from georax._geometry.base import post_lie_bracket
+from georax import Manifold, post_lie_bracket
 from jaxtyping import Array
 
 from roughrax._bases import PrimitiveBasis

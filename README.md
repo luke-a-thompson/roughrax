@@ -15,23 +15,40 @@ Roughrax enables the solving of rough differential equations natively in [Diffra
 `LogODE` solves a rough differential equation by lifting log-signatures of the driving path into a frozen vector field and integrating that field with a wrapped Diffrax solver. You pick accuracy/adaptivity by choosing the base solver — `LogODE` reuses its Runge-Kutta coefficients.
 
 - Wrap a fixed-step ERK (for example `Heun()`) for fixed-step rough integration.
-- Wrap an adaptive ERK (for example `Dopri5()`) to keep automatic stepsizing.
+- Wrap an adaptive ERK (for example `Dopri5()`) to keep automatic stepsizing,
+  and clip its controller at every signature knot.
 - Pass the base solver explicitly, for example `LogODE(diffrax.Tsit5())`.
 - Wrap a geometric solver such as `georax.RKMK(diffrax.Tsit5())` when solving on a manifold.
 
-## RoughTerm
+Signature coefficients are local to one knot interval, so solver steps must not
+cross knots. Use `diffrax.StepTo(signature_knots)` for fixed stepping, or preserve
+adaptive stepping with:
 
-`RoughTerm` holds the rough-path data. Pass it a fine driving path (any diffrax `LinearInterpolation`-like control), and it computes log-signatures over each interval of `interval_ts` internally via [pysiglib](https://github.com/luke-a-thompson/pysiglib).
+```python
+controller = diffrax.ClipStepSizeController(
+    diffrax.PIDController(rtol=1e-5, atol=1e-7),
+    step_ts=signature_knots,
+)
+```
+
+## SignatureInterpolation and RoughTerm
+
+`SignatureInterpolation` computes local log-signatures from a finely sampled
+Diffrax `LinearInterpolation`-like control. The signature knots must be a regularly
+strided subsequence of the control sample grid.
 
 | Argument | Purpose |
 |----------|---------|
-| `vector_field` | Function `y -> Array` returning the stacked vector fields. |
 | `control` | Fine driving path with `.ts` / `.ys` (e.g. `diffrax.LinearInterpolation`). |
-| `geometry` | `georax.Manifold` the solution lives on (defaults to `Euclidean`). |
+| `signature_knots` | Coarse grid, equal to `control.ts[::stride]`, with one local log-signature per interval. |
 | `depth` | Truncation depth of the log-signature. |
-| `interval_ts` | Coarse grid the solver steps on. One log-signature per consecutive pair. Defaults to `control.ts`. |
 | `solution` | `"stratonovich"` (log-signature, Lyndon basis) or `"ito"` (branched signature, rooted-tree basis). |
 | `correction` | Optional PySigLib correction passed unchanged to `branched_log_sig`; requires `solution="ito"`. |
+
+`RoughTerm(vector_field, control, geometry)` then combines the materialised
+signature control with level-one vector fields and the solution geometry. For a
+vector field that already returns all lifted log-signature columns, use
+`RoughTerm.from_lifted_vector_field(...)` explicitly.
 
 ## Understanding Rough Path Integration
 1. Sample a (rough) driving path on a fine grid: $X_t \in \mathbb{R}^d$
@@ -90,6 +107,10 @@ directly with matrix exponentials. `LinearMagnus` uses one exponential of the
 full contracted log-signature. `LinearFer` uses homogeneous Fer factors and
 supports log-signature depths through 6.
 
+The vector field must expose its level-one matrices as a `matrix_basis` array of
+shape `(driver_dim, matrix_dim, matrix_dim)`. The solver's `side` must match the
+left or right matrix action implemented by the vector field.
+
 The exact-rational Fer recipes are checked into
 `roughrax/_solver/_fer_coefficients.py`. They were generated and exactly
 verified with [Hofstaetter's BCH program](https://github.com/HaraldHofstaetter/BCH),
@@ -140,6 +161,9 @@ control = SignatureInterpolation.from_logsignatures(
     depth=3,
 )
 ```
+
+`LinearMagnus` and `LinearFer` accept those batch dimensions directly. For a
+generic `LogODE` solve, use `jax.vmap` over independent controls and initial states.
 
 ## Geometric usage
 
