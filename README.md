@@ -83,6 +83,25 @@ sol = diffrax.diffeqsolve(
 )
 ```
 
+### Linear matrix equations
+
+`LinearMagnus` and `LinearFer` solve Stratonovich linear matrix equations
+directly with matrix exponentials. `LinearMagnus` uses one exponential of the
+full contracted log-signature. `LinearFer` uses homogeneous Fer factors and
+supports log-signature depths through 6.
+
+The exact-rational Fer recipes are checked into
+`roughrax/_solver/_fer_coefficients.py`. They were generated and exactly
+verified with [Hofstaetter's BCH program](https://github.com/HaraldHofstaetter/BCH),
+so that the logarithm of the factor product agrees with the Magnus generator
+through every retained weighted degree. Regenerate the table after building
+that program locally with:
+
+```bash
+uv run python tools/generate_fer_coefficients.py /path/to/BCH/bch --max-depth 6 \
+  > roughrax/_solver/_fer_coefficients.py
+```
+
 ### Branched Itô correction
 
 `solution="ito"` selects branched log-signatures. Supply PySigLib's optional

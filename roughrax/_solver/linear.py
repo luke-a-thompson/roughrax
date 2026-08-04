@@ -10,6 +10,7 @@ from diffrax import AbstractLocalInterpolation, AbstractSolver, RESULTS
 from jaxtyping import Array
 
 from roughrax._bases import PrimitiveBasis
+from roughrax._solver._fer_coefficients import FER_FACTORS, FER_MAX_DEPTH, LieWord
 from roughrax._term import RoughTerm, unwrap_rough_term
 
 Side = Literal["right", "left"]
@@ -178,6 +179,31 @@ def _degree_components(
     ]
 
 
+def _fer_factors(components: list[Array]) -> Array:
+    values: dict[LieWord, Array] = {
+        index: component for index, component in enumerate(components)
+    }
+
+    def evaluate(word: LieWord) -> Array:
+        value = values.get(word)
+        if value is None:
+            if isinstance(word, int):
+                raise ValueError(f"Fer component index {word} is unavailable.")
+            value = _matrix_commutator(evaluate(word[0]), evaluate(word[1]))
+            values[word] = value
+        return value
+
+    factors = []
+    for recipe in FER_FACTORS[: len(components)]:
+        factor = jnp.zeros_like(components[0])
+        for numerator, denominator, word in recipe:
+            value = evaluate(word)
+            coefficient = jnp.asarray(numerator, dtype=value.dtype) / denominator
+            factor = factor + coefficient * value
+        factors.append(factor)
+    return jnp.stack(factors)
+
+
 class LinearMagnus(AbstractSolver[None]):
     """Linear RDE solver using one matrix Magnus exponential."""
 
@@ -215,7 +241,7 @@ class LinearMagnus(AbstractSolver[None]):
 
 
 class LinearFer(AbstractSolver[None]):
-    """Linear RDE solver using a depth-3 truncated Fer product."""
+    """Linear RDE solver using a truncated Fer product through depth 6."""
 
     term_structure = RoughTerm
     interpolation_cls = _LinearFerInterpolation
@@ -235,19 +261,12 @@ class LinearFer(AbstractSolver[None]):
         del args, solver_state, made_jump
         rough_term = unwrap_rough_term(terms)
         _check_linear_rough_term(rough_term)
-        if rough_term.basis.depth > 3:
-            raise ValueError("LinearFer currently supports depth <= 3.")
+        if rough_term.basis.depth > FER_MAX_DEPTH:
+            raise ValueError(f"LinearFer currently supports depth <= {FER_MAX_DEPTH}.")
 
         matrices = _matrix_basis(rough_term, y0, self.side)
         components = _degree_components(terms.contr(t0, t1), matrices, rough_term.basis)
-        factors_list = [components[0]]
-        if rough_term.basis.depth >= 2:
-            factors_list.append(components[1])
-        if rough_term.basis.depth >= 3:
-            factors_list.append(
-                components[2] - 0.5 * _matrix_commutator(components[0], components[1])
-            )
-        factors = jnp.stack(factors_list)
+        factors = _fer_factors(components)
 
         y = y0
         if self.side == "right":
