@@ -3,6 +3,8 @@ from __future__ import annotations
 import diffrax
 import equinox as eqx
 import jax.numpy as jnp
+import pysiglib.jax_api as pysiglib
+import pytest
 from georax import Euclidean
 
 from roughrax import LogODE, RoughTerm, SignatureInterpolation
@@ -94,3 +96,43 @@ def test_signature_interpolation_evaluates_linearly():
         ),
         0.5 * control.coeffs[0],
     )
+
+
+def test_ito_correction_is_forwarded_to_pysiglib():
+    ts = jnp.linspace(0.0, 1.0, 5)
+    ys = jnp.asarray([[0.0], [0.2], [-0.1], [0.4], [0.3]])
+    signature_knots = ts[::2]
+    correction = jnp.asarray([0.25], dtype=ys.dtype)
+    windows = jnp.stack([ys[:3], ys[2:]])
+
+    control = SignatureInterpolation(
+        diffrax.LinearInterpolation(ts=ts, ys=ys),
+        signature_knots,
+        depth=2,
+        solution="ito",
+        correction=correction,
+    ).materialise(Euclidean())
+
+    pysiglib.prepare_branched_sig(1, 2, planar=False)
+    expected = pysiglib.branched_log_sig(
+        windows,
+        2,
+        planar=False,
+        correction=correction,
+    )
+    assert jnp.array_equal(control.correction, correction)
+    assert jnp.allclose(control.coeffs, expected)
+
+
+def test_signature_interpolation_rejects_stratonovich_correction():
+    ts = jnp.asarray([0.0, 1.0])
+    driver = diffrax.LinearInterpolation(ts=ts, ys=ts[:, None])
+
+    with pytest.raises(ValueError, match="requires solution='ito'"):
+        SignatureInterpolation(
+            driver,
+            ts,
+            depth=2,
+            solution="stratonovich",
+            correction=jnp.asarray([1.0]),
+        )

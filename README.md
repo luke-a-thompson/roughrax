@@ -31,6 +31,7 @@ Roughrax enables the solving of rough differential equations natively in [Diffra
 | `depth` | Truncation depth of the log-signature. |
 | `interval_ts` | Coarse grid the solver steps on. One log-signature per consecutive pair. Defaults to `control.ts`. |
 | `solution` | `"stratonovich"` (log-signature, Lyndon basis) or `"ito"` (branched signature, rooted-tree basis). |
+| `correction` | Optional PySigLib correction passed unchanged to `branched_log_sig`; requires `solution="ito"`. |
 
 ## Understanding Rough Path Integration
 1. Sample a (rough) driving path on a fine grid: $X_t \in \mathbb{R}^d$
@@ -81,6 +82,32 @@ sol = diffrax.diffeqsolve(
     saveat=diffrax.SaveAt(ts=coarse_ts),
 )
 ```
+
+### Branched Itô correction
+
+`solution="ito"` selects branched log-signatures. Supply PySigLib's optional
+`correction` directly; Roughrax does not infer a covariance or modify its
+normalisation. For uniformly sampled Brownian motion with covariance `Sigma`,
+PySigLib's level-2 correction is:
+
+```python
+dt = fine_ts[1] - fine_ts[0]
+Sigma = jnp.eye(fine_xs.shape[-1])
+correction = (dt * Sigma).reshape(-1)
+
+control = SignatureInterpolation(
+    driver,
+    coarse_ts,
+    depth=3,
+    solution="ito",
+    correction=correction,
+)
+```
+
+PySigLib broadcasts a correction of shape `(C,)` over every path segment. It
+also accepts per-window shapes `(stride, C)` and
+`(len(coarse_ts) - 1, stride, C)`, where
+`C = d**2 + ... + d**m` for correction levels 2 through `m`.
 
 ## Geometric usage
 

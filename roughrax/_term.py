@@ -29,6 +29,7 @@ class SignatureInterpolation(AbstractPath):
     control: AbstractPath
     ts: Array
     coeffs: Array | None
+    correction: Array | None
     basis: PrimitiveBasis | None = eqx.field(static=True)
     depth: int = eqx.field(static=True)
     solution: Literal["ito", "stratonovich"] = eqx.field(static=True)
@@ -47,16 +48,21 @@ class SignatureInterpolation(AbstractPath):
         signature_knots: Array,
         depth: int,
         solution: Literal["ito", "stratonovich"],
+        *,
+        correction: Array | None = None,
     ):
         if getattr(control, "ts", None) is None or getattr(control, "ys", None) is None:
             raise TypeError(
                 "SignatureInterpolation requires a diffrax "
                 "LinearInterpolation-like path with `.ts` and `.ys`."
             )
+        if solution == "stratonovich" and correction is not None:
+            raise ValueError("correction requires solution='ito'.")
 
         self.control = control
         self.ts = jnp.asarray(signature_knots)
         self.coeffs = None
+        self.correction = None if correction is None else jnp.asarray(correction)
         self.basis = None
         self.depth = depth
         self.solution = solution
@@ -95,6 +101,7 @@ class SignatureInterpolation(AbstractPath):
                     windows,
                     self.depth,
                     planar=planar,
+                    correction=self.correction,
                 )
             case "stratonovich":
                 basis = make_lyndon_basis(self.depth, dim)
@@ -103,7 +110,13 @@ class SignatureInterpolation(AbstractPath):
             case _:
                 raise ValueError(f"Unknown solution type {self.solution!r}.")
 
-        out = SignatureInterpolation(self.control, self.ts, self.depth, self.solution)
+        out = SignatureInterpolation(
+            self.control,
+            self.ts,
+            self.depth,
+            self.solution,
+            correction=self.correction,
+        )
         object.__setattr__(out, "coeffs", coeffs)
         object.__setattr__(out, "basis", basis)
         return out

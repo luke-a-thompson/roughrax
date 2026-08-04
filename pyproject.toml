@@ -46,7 +46,7 @@ dependencies = [
     "georax>=0.1.0",
     "jaxtyping>=0.3.0",
     "numpy>=2.0",
-    "pysiglib>=3.0.3",
+    "pysiglib>=3.1.0",
     "torch>=2.12.0",
 ]
 
