@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import diffrax
 import equinox as eqx
+import jax
 import jax.numpy as jnp
 import pysiglib.jax_api as pysiglib
 import pytest
@@ -136,3 +137,130 @@ def test_signature_interpolation_rejects_stratonovich_correction():
             solution="stratonovich",
             correction=jnp.asarray([1.0]),
         )
+
+
+def test_from_logsignatures_matches_materialised_control():
+    sample_ts = jnp.linspace(0.0, 1.0, 5)
+    ys = jnp.stack([sample_ts, sample_ts * 0.5], axis=-1)
+    signature_knots = sample_ts[::2]
+    materialised = SignatureInterpolation(
+        diffrax.LinearInterpolation(ts=sample_ts, ys=ys),
+        signature_knots,
+        depth=3,
+        solution="stratonovich",
+    ).materialise(Euclidean())
+    assert materialised.coeffs is not None
+
+    control = SignatureInterpolation.from_logsignatures(
+        signature_knots,
+        materialised.coeffs,
+        input_dim=2,
+        depth=3,
+    )
+
+    assert control.basis is not None
+    assert materialised.basis is not None
+    assert control.basis.keys == materialised.basis.keys
+    assert jnp.allclose(
+        control.evaluate(signature_knots[0], signature_knots[-1]),
+        materialised.evaluate(signature_knots[0], signature_knots[-1]),
+    )
+
+
+@pytest.mark.parametrize(
+    ("ts", "coeffs", "message"),
+    [
+        (jnp.ones((2, 2)), jnp.ones((1, 3)), "ts must have shape"),
+        (jnp.ones((1,)), jnp.ones((0, 3)), "at least two points"),
+        (jnp.ones((3,)), jnp.ones((6,)), "coeffs must have shape"),
+        (jnp.ones((3,)), jnp.ones((1, 3)), "first axis"),
+        (jnp.ones((3,)), jnp.ones((2, 4)), "last axis"),
+    ],
+)
+def test_from_logsignatures_validates_array_dimensions(ts, coeffs, message):
+    with pytest.raises(ValueError, match=message):
+        SignatureInterpolation.from_logsignatures(
+            ts,
+            coeffs,
+            input_dim=2,
+            depth=2,
+        )
+
+
+@pytest.mark.parametrize(("name", "value"), [("input_dim", 0), ("depth", 0)])
+def test_from_logsignatures_requires_positive_integer_dimensions(name, value):
+    kwargs = dict(input_dim=2, depth=2)
+    kwargs[name] = value
+    with pytest.raises(ValueError, match=name):
+        SignatureInterpolation.from_logsignatures(
+            jnp.asarray([0.0, 1.0]),
+            jnp.ones((1, 3)),
+            **kwargs,
+        )
+
+
+def test_from_logsignatures_rejects_ito_coefficients():
+    with pytest.raises(ValueError, match="branched log-signatures"):
+        SignatureInterpolation.from_logsignatures(
+            jnp.asarray([0.0, 1.0]),
+            jnp.ones((1, 3)),
+            input_dim=2,
+            depth=2,
+            solution="ito",  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.parametrize(
+    "ts",
+    [jnp.asarray([0.0, 0.5, 0.5]), jnp.asarray([0.0, 1.0, 0.5])],
+)
+def test_from_logsignatures_requires_strictly_increasing_ts(ts):
+    with pytest.raises(eqx.EquinoxRuntimeError, match="strictly increasing"):
+        SignatureInterpolation.from_logsignatures(
+            ts,
+            jnp.ones((2, 3)),
+            input_dim=2,
+            depth=2,
+        )
+
+
+def test_from_logsignatures_is_filter_jit_and_vmap_safe():
+    ts = jnp.asarray([0.0, 0.4, 1.0])
+    coeffs_batch = jnp.asarray(
+        [
+            [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]],
+            [[0.7, 0.8, 0.9], [1.0, 1.1, 1.2]],
+        ]
+    )
+
+    @eqx.filter_jit
+    def evaluate_population(ts, coeffs_batch):
+        def evaluate_one(coeffs):
+            control = SignatureInterpolation.from_logsignatures(
+                ts,
+                coeffs,
+                input_dim=2,
+                depth=2,
+            )
+            return control.evaluate(ts[0], ts[-1])
+
+        return jax.vmap(evaluate_one)(coeffs_batch)
+
+    @eqx.filter_jit
+    def evaluate_batched_control(ts, coeffs):
+        control = SignatureInterpolation.from_logsignatures(
+            ts,
+            coeffs,
+            input_dim=2,
+            depth=2,
+        )
+        return control.evaluate(ts[0], ts[-1])
+
+    assert jnp.allclose(
+        evaluate_population(ts, coeffs_batch), coeffs_batch.sum(axis=1)
+    )
+    interval_batched_coeffs = jnp.swapaxes(coeffs_batch, 0, 1)
+    assert jnp.allclose(
+        evaluate_batched_control(ts, interval_batched_coeffs),
+        interval_batched_coeffs.sum(axis=0),
+    )

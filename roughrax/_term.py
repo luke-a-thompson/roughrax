@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from numbers import Integral
 from typing import Any, Literal
 
 import equinox as eqx
@@ -24,9 +25,9 @@ from roughrax._pseudo_bialgebra_map import (
 
 
 class SignatureInterpolation(AbstractPath):
-    """Log-signature interpolation over a sampled control."""
+    """Log-signature interpolation over a knot sequence."""
 
-    control: AbstractPath
+    control: AbstractPath | None
     ts: Array
     coeffs: Array | None
     correction: Array | None
@@ -67,9 +68,95 @@ class SignatureInterpolation(AbstractPath):
         self.depth = depth
         self.solution = solution
 
+    @classmethod
+    def from_logsignatures(
+        cls,
+        ts: Array,
+        coeffs: Array,
+        input_dim: int,
+        depth: int,
+        solution: Literal["stratonovich"] = "stratonovich",
+    ) -> SignatureInterpolation:
+        """Construct from local PySigLib method-1 Lyndon log-signatures.
+
+        ``coeffs[i]`` must be the log-signature over ``[ts[i], ts[i + 1]]``.
+        Its shape must be ``(num_intervals, *batch_shape, logsig_dim)``. The
+        final coefficient axis follows ``pysiglib.lyndon_words`` ordering and
+        does not include a scalar term.
+        """
+        if solution != "stratonovich":
+            raise ValueError(
+                "from_logsignatures requires solution='stratonovich'; "
+                "Itô controls use branched log-signatures."
+            )
+        if (
+            not isinstance(input_dim, Integral)
+            or isinstance(input_dim, bool)
+            or input_dim < 1
+        ):
+            raise ValueError("input_dim must be a positive integer.")
+        if not isinstance(depth, Integral) or isinstance(depth, bool) or depth < 1:
+            raise ValueError("depth must be a positive integer.")
+
+        input_dim = int(input_dim)
+        depth = int(depth)
+        ts = jnp.asarray(ts)
+        coeffs = jnp.asarray(coeffs)
+
+        if ts.ndim != 1:
+            raise ValueError(
+                "ts must have shape (num_intervals + 1,), "
+                f"got {ts.shape}."
+            )
+        if ts.shape[0] < 2:
+            raise ValueError("ts must contain at least two points.")
+        if coeffs.ndim < 2:
+            raise ValueError(
+                "coeffs must have shape "
+                "(num_intervals, *batch_shape, logsig_dim), "
+                f"got {coeffs.shape}."
+            )
+
+        basis = make_lyndon_basis(depth, input_dim)
+        num_intervals = ts.shape[0] - 1
+        logsig_dim = len(basis.keys)
+        if coeffs.shape[0] != num_intervals:
+            raise ValueError(
+                "coeffs first axis must have length "
+                f"num_intervals={num_intervals}, got {coeffs.shape[0]}."
+            )
+        if coeffs.shape[-1] != logsig_dim:
+            raise ValueError(
+                "coeffs last axis must have length "
+                f"logsig_dim={logsig_dim} for input_dim={input_dim} and "
+                f"depth={depth}, got {coeffs.shape[-1]}."
+            )
+
+        ts = eqx.error_if(
+            ts,
+            (~jnp.isfinite(ts)).any() | (ts[1:] <= ts[:-1]).any(),
+            "ts must be finite and strictly increasing.",
+        )
+
+        out = object.__new__(cls)
+        object.__setattr__(out, "control", None)
+        object.__setattr__(out, "ts", ts)
+        object.__setattr__(out, "coeffs", coeffs)
+        object.__setattr__(out, "correction", None)
+        object.__setattr__(out, "basis", basis)
+        object.__setattr__(out, "depth", depth)
+        object.__setattr__(out, "solution", solution)
+        return out
+
     def materialise(self, geometry: Manifold[Any]) -> SignatureInterpolation:
         if self.coeffs is not None:
             return self
+
+        if self.control is None:
+            raise RuntimeError(
+                "SignatureInterpolation has neither a sampled control nor "
+                "precomputed coefficients."
+            )
 
         control_ts = getattr(self.control, "ts")
         ys = jnp.asarray(getattr(self.control, "ys"))

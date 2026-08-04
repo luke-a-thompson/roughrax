@@ -40,6 +40,14 @@ def left_linear_vector_field(y):
     return jnp.stack([matrix @ y for matrix in MATRICES])
 
 
+class RightLinearVectorFieldWithBasis:
+    def __call__(self, y):
+        return jnp.stack([y @ matrix for matrix in MATRICES])
+
+    def matrix_basis(self):
+        return MATRICES
+
+
 def _driver(depth):
     ts = jnp.linspace(0.0, 1.0, 5)
     xs = jnp.asarray(
@@ -157,6 +165,85 @@ def test_linear_fer_log_ode_matches_depth3_product():
     f2 = components[1]
     f3 = components[2] - 0.5 * _commutator(components[0], components[1])
     expected = y0 @ jsl.expm(f1) @ jsl.expm(f2) @ jsl.expm(f3)
+
+    assert jnp.allclose(actual, expected, atol=1e-6, rtol=1e-6)
+
+
+@pytest.mark.parametrize(
+    "solver",
+    [LinearMagnus(side="right"), LinearFer(side="right")],
+)
+def test_precomputed_batched_logsignatures_match_materialised_controls(solver):
+    sample_ts = jnp.linspace(0.0, 1.0, 5)
+    signature_knots = sample_ts[::2]
+    paths = jnp.asarray(
+        [
+            [
+                [0.0, 0.0],
+                [0.3, 0.1],
+                [0.1, 0.5],
+                [0.7, -0.2],
+                [0.4, 0.3],
+            ],
+            [
+                [0.0, 0.0],
+                [-0.2, 0.4],
+                [0.5, 0.2],
+                [0.1, 0.8],
+                [0.6, -0.1],
+            ],
+        ]
+    )
+    materialised_controls = [
+        SignatureInterpolation(
+            diffrax.LinearInterpolation(ts=sample_ts, ys=path),
+            signature_knots,
+            depth=3,
+            solution="stratonovich",
+        ).materialise(Euclidean())
+        for path in paths
+    ]
+    assert all(control.coeffs is not None for control in materialised_controls)
+
+    interval_batched_coeffs = jnp.stack(
+        [control.coeffs for control in materialised_controls],
+        axis=1,
+    )
+    precomputed_control = SignatureInterpolation.from_logsignatures(
+        signature_knots,
+        interval_batched_coeffs,
+        input_dim=2,
+        depth=3,
+    )
+
+    assert precomputed_control.basis is not None
+    assert materialised_controls[0].basis is not None
+    assert precomputed_control.basis.keys == materialised_controls[0].basis.keys
+
+    vector_field = RightLinearVectorFieldWithBasis()
+    y0 = jnp.asarray(
+        [
+            [[1.0, 0.2], [-0.1, 0.8]],
+            [[0.8, -0.2], [0.3, 1.1]],
+        ]
+    )
+    actual = _solve(
+        RoughTerm(vector_field, precomputed_control, Euclidean()),
+        solver,
+        signature_knots,
+        y0,
+    )
+    expected = jnp.stack(
+        [
+            _solve(
+                RoughTerm(vector_field, control, Euclidean()),
+                solver,
+                signature_knots,
+                initial,
+            )
+            for control, initial in zip(materialised_controls, y0, strict=True)
+        ]
+    )
 
     assert jnp.allclose(actual, expected, atol=1e-6, rtol=1e-6)
 

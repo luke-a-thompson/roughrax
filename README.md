@@ -109,6 +109,19 @@ also accepts per-window shapes `(stride, C)` and
 `(len(coarse_ts) - 1, stride, C)`, where
 `C = d**2 + ... + d**m` for correction levels 2 through `m`.
 
+If the local Lyndon log-signatures have already been computed in PySigLib
+method-1 ordering, construct the same control without retaining a raw path:
+
+```python
+# Shape: (len(coarse_ts) - 1, *batch_shape, logsig_dim).
+control = SignatureInterpolation.from_logsignatures(
+    coarse_ts,
+    local_logsignatures,
+    input_dim=2,
+    depth=3,
+)
+```
+
 ## Geometric usage
 
 For manifold-valued equations, pass the target geometry to `RoughTerm` and wrap a geometric base solver with `LogODE`. The vector field should return the stacked driving fields in the coordinates expected by the manifold.
