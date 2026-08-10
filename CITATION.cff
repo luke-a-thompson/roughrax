@@ -1,0 +1,50 @@
+cff-version: 1.2.0
+message: "If you use Roughrax, please cite the preferred paper below."
+title: "Roughrax"
+type: software
+authors:
+  - family-names: "Thompson"
+    given-names: "Luke"
+    email: "luke.thompson@sydney.edu.au"
+version: 0.1.0
+license: Apache-2.0
+repository-code: "https://github.com/luke-a-thompson/roughrax"
+url: "https://github.com/luke-a-thompson/roughrax"
+preferred-citation:
+  type: article
+  authors:
+    - family-names: "Thompson"
+      given-names: "Luke"
+    - family-names: "Shi"
+      given-names: "Dai"
+    - family-names: "Lin"
+      given-names: "Lequan"
+    - family-names: "Gao"
+      given-names: "Junbin"
+    - family-names: "Han"
+      given-names: "Andi"
+  title: >-
+    Learning Manifold and Itô Dynamics with Branched Neural Rough Differential
+    Equations
+  doi: "10.48550/arXiv.2606.05272"
+  year: 2026
+  url: "https://arxiv.org/abs/2606.05272"
+references:
+  - type: article
+    authors:
+      - family-names: "Castell"
+        given-names: "Fabienne"
+      - family-names: "Gaines"
+        given-names: "Jessica"
+    title: >-
+      The ordinary differential equation approach to asymptotically efficient
+      schemes for solution of stochastic differential equations
+    journal: "Annales de l'I.H.P. Probabilités et statistiques"
+    volume: 32
+    issue: 2
+    start: 231
+    end: 250
+    year: 1996
+    publisher:
+      name: "Gauthier-Villars"
+    url: "https://www.numdam.org/item/AIHPB_1996__32_2_231_0/"

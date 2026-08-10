@@ -248,3 +248,21 @@ If you use roughrax, please cite:
       url={https://arxiv.org/abs/2606.05272}, 
 }
 ```
+
+and, if you use the log-ODE method,
+
+```bibtex
+@article{AIHPB_1996__32_2_231_0,
+  author = {Castell, Fabienne and Gaines, Jessica},
+  title = {The ordinary differential equation approach to asymptotically efficient schemes for solution of stochastic differential equations},
+  journal = {Annales de l'I.H.P. Probabilit\'es et statistiques},
+  pages = {231--250},
+  year = {1996},
+  publisher = {Gauthier-Villars},
+  volume = {32},
+  number = {2},
+  mrnumber = {1386220},
+  zbl = {0851.60054},
+  url = {https://www.numdam.org/item/AIHPB_1996__32_2_231_0/}
+}
+```
