@@ -75,21 +75,14 @@ class SignatureInterpolation(AbstractPath):
         coeffs: Array,
         input_dim: int,
         depth: int,
-        solution: Literal["stratonovich"] = "stratonovich",
     ) -> SignatureInterpolation:
         """Construct from local PySigLib method-1 Lyndon log-signatures.
 
         ``coeffs[i]`` must be the log-signature over ``[ts[i], ts[i + 1]]``.
-        Its shape must be ``(num_intervals, *batch_shape, logsig_dim)``. The
-        final coefficient axis follows ``pysiglib.lyndon_words`` ordering and
-        does not include a scalar term. Generic ``LogODE`` solves should vmap
-        over batch dimensions; the linear solvers support them directly.
+        Its shape must be ``(num_intervals, logsig_dim)``. The final coefficient
+        axis follows ``pysiglib.lyndon_words`` ordering and does not include a
+        scalar term. Use ``jax.vmap`` over independent controls and solves.
         """
-        if solution != "stratonovich":
-            raise ValueError(
-                "from_logsignatures requires solution='stratonovich'; "
-                "Itô controls use branched log-signatures."
-            )
         if (
             not isinstance(input_dim, Integral)
             or isinstance(input_dim, bool)
@@ -110,10 +103,9 @@ class SignatureInterpolation(AbstractPath):
             )
         if ts.shape[0] < 2:
             raise ValueError("ts must contain at least two points.")
-        if coeffs.ndim < 2:
+        if coeffs.ndim != 2:
             raise ValueError(
-                "coeffs must have shape "
-                "(num_intervals, *batch_shape, logsig_dim), "
+                "coeffs must have shape (num_intervals, logsig_dim), "
                 f"got {coeffs.shape}."
             )
 
@@ -145,7 +137,7 @@ class SignatureInterpolation(AbstractPath):
         object.__setattr__(out, "correction", None)
         object.__setattr__(out, "basis", basis)
         object.__setattr__(out, "depth", depth)
-        object.__setattr__(out, "solution", solution)
+        object.__setattr__(out, "solution", "stratonovich")
         return out
 
     def materialise(self, geometry: Manifold[Any]) -> SignatureInterpolation:
@@ -326,11 +318,6 @@ class RoughTerm(AbstractTerm[Array, Array]):
         return self.control.evaluate(t0, t1, **kwargs)
 
     def prod(self, vf, control):
-        if control.ndim != 1:
-            raise ValueError(
-                "Batched controls are not supported by generic RoughTerm; "
-                "use jax.vmap over independent solves."
-            )
         return jnp.tensordot(control, vf, axes=1)
 
     def is_vf_expensive(self, t0, t1, y, args) -> bool:

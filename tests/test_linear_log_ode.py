@@ -192,7 +192,7 @@ def test_linear_solvers_require_level_one_matrix_basis():
     "solver",
     [LinearMagnus(side="right"), LinearFer(side="right")],
 )
-def test_precomputed_batched_logsignatures_match_materialised_controls(solver):
+def test_vmapped_precomputed_logsignatures_match_materialised_controls(solver):
     sample_ts = jnp.linspace(0.0, 1.0, 5)
     signature_knots = sample_ts[::2]
     paths = jnp.asarray(
@@ -224,20 +224,10 @@ def test_precomputed_batched_logsignatures_match_materialised_controls(solver):
     ]
     assert all(control.coeffs is not None for control in materialised_controls)
 
-    interval_batched_coeffs = jnp.stack(
-        [control.coeffs for control in materialised_controls],
-        axis=1,
-    )
-    precomputed_control = SignatureInterpolation.from_logsignatures(
-        signature_knots,
-        interval_batched_coeffs,
-        input_dim=2,
-        depth=3,
-    )
-
-    assert precomputed_control.basis is not None
     assert materialised_controls[0].basis is not None
-    assert precomputed_control.basis.keys == materialised_controls[0].basis.keys
+    path_coeffs = jnp.stack(
+        [control.coeffs for control in materialised_controls],
+    )
 
     vector_field = right_linear_vector_field
     y0 = jnp.asarray(
@@ -246,12 +236,22 @@ def test_precomputed_batched_logsignatures_match_materialised_controls(solver):
             [[0.8, -0.2], [0.3, 1.1]],
         ]
     )
-    actual = _solve(
-        RoughTerm(vector_field, precomputed_control, Euclidean()),
-        solver,
-        signature_knots,
-        y0,
-    )
+
+    def solve_precomputed(coeffs, initial):
+        control = SignatureInterpolation.from_logsignatures(
+            signature_knots,
+            coeffs,
+            input_dim=2,
+            depth=3,
+        )
+        return _solve(
+            RoughTerm(vector_field, control, Euclidean()),
+            solver,
+            signature_knots,
+            initial,
+        )
+
+    actual = jax.vmap(solve_precomputed)(path_coeffs, y0)
     expected = jnp.stack(
         [
             _solve(

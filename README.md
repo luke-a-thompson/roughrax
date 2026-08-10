@@ -153,7 +153,7 @@ If the local Lyndon log-signatures have already been computed in PySigLib
 method-1 ordering, construct the same control without retaining a raw path:
 
 ```python
-# Shape: (len(coarse_ts) - 1, *batch_shape, logsig_dim).
+# Shape: (len(coarse_ts) - 1, logsig_dim).
 control = SignatureInterpolation.from_logsignatures(
     coarse_ts,
     local_logsignatures,
@@ -162,8 +162,7 @@ control = SignatureInterpolation.from_logsignatures(
 )
 ```
 
-`LinearMagnus` and `LinearFer` accept those batch dimensions directly. For a
-generic `LogODE` solve, use `jax.vmap` over independent controls and initial states.
+All three solvers handle one control and initial state at a time. Use `jax.vmap` over independent controls and initial states.
 
 ## Geometric usage
 

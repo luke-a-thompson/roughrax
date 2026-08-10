@@ -127,21 +127,14 @@ def test_signature_intervals_may_not_cross_knots():
         control.evaluate(0.0, 2.0)
 
 
-def test_generic_rough_term_rejects_batched_controls():
-    control = SignatureInterpolation.from_logsignatures(
-        jnp.asarray([0.0, 1.0]),
-        jnp.ones((1, 2, 2)),
-        input_dim=2,
-        depth=1,
-    )
-
-    def vector_field(y):
-        return jnp.stack([jnp.ones_like(y), 2 * jnp.ones_like(y)])
-
-    term = RoughTerm(vector_field, control, Euclidean())
-    y = jnp.asarray([0.0, 1.0])
-    with pytest.raises(ValueError, match="jax.vmap"):
-        term.prod(term.vf(0.0, y, None), term.contr(0.0, 1.0))
+def test_from_logsignatures_rejects_batched_coefficients():
+    with pytest.raises(ValueError, match="coeffs must have shape"):
+        SignatureInterpolation.from_logsignatures(
+            jnp.asarray([0.0, 1.0]),
+            jnp.ones((1, 2, 2)),
+            input_dim=2,
+            depth=1,
+        )
 
 
 def test_ito_correction_is_forwarded_to_pysiglib():
@@ -245,17 +238,6 @@ def test_from_logsignatures_requires_positive_integer_dimensions(name, value):
         )
 
 
-def test_from_logsignatures_rejects_ito_coefficients():
-    with pytest.raises(ValueError, match="branched log-signatures"):
-        SignatureInterpolation.from_logsignatures(
-            jnp.asarray([0.0, 1.0]),
-            jnp.ones((1, 3)),
-            input_dim=2,
-            depth=2,
-            solution="ito",  # type: ignore[arg-type]
-        )
-
-
 @pytest.mark.parametrize(
     "ts",
     [jnp.asarray([0.0, 0.5, 0.5]), jnp.asarray([0.0, 1.0, 0.5])],
@@ -294,21 +276,4 @@ def test_from_logsignatures_is_filter_jit_and_vmap_safe():
 
         return jax.vmap(evaluate_one)(coeffs_batch)
 
-    @eqx.filter_jit
-    def evaluate_batched_control(ts, coeffs):
-        control = SignatureInterpolation.from_logsignatures(
-            ts,
-            coeffs,
-            input_dim=2,
-            depth=2,
-        )
-        return jnp.stack(
-            [control.evaluate(ts[i], ts[i + 1]) for i in range(ts.shape[0] - 1)]
-        )
-
     assert jnp.allclose(evaluate_population(ts, coeffs_batch), coeffs_batch)
-    interval_batched_coeffs = jnp.swapaxes(coeffs_batch, 0, 1)
-    assert jnp.allclose(
-        evaluate_batched_control(ts, interval_batched_coeffs),
-        interval_batched_coeffs,
-    )
