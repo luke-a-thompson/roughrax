@@ -169,12 +169,8 @@ def _fer_factors(components: list[Array]) -> Array:
     return jnp.stack(factors)
 
 
-class LinearMagnus(AbstractSolver[None]):
-    """Linear RDE solver using one matrix Magnus exponential."""
-
+class _AbstractLinearSolver(AbstractSolver[None]):
     term_structure = RoughTerm
-    interpolation_cls = _LinearMagnusInterpolation
-
     side: Side = eqx.field(static=True)
 
     def __init__(self, *, side: Side = "right"):
@@ -185,6 +181,15 @@ class LinearMagnus(AbstractSolver[None]):
     def init(self, terms, t0, t1, y0, args) -> None:
         del terms, t0, t1, y0, args
         return None
+
+    def func(self, terms, t0, y0, args):
+        return terms.vf(t0, y0, args)
+
+
+class LinearMagnus(_AbstractLinearSolver):
+    """Linear RDE solver using one matrix Magnus exponential."""
+
+    interpolation_cls = _LinearMagnusInterpolation
 
     def step(self, terms, t0, t1, y0, args, solver_state, made_jump):
         del args, solver_state, made_jump
@@ -201,26 +206,11 @@ class LinearMagnus(AbstractSolver[None]):
         )
         return y1, None, dense_info, None, RESULTS.successful
 
-    def func(self, terms, t0, y0, args):
-        return terms.vf(t0, y0, args)
 
-
-class LinearFer(AbstractSolver[None]):
+class LinearFer(_AbstractLinearSolver):
     """Linear RDE solver using a truncated Fer product through depth 6."""
 
-    term_structure = RoughTerm
     interpolation_cls = _LinearFerInterpolation
-
-    side: Side = eqx.field(static=True)
-
-    def __init__(self, *, side: Side = "right"):
-        if side not in {"right", "left"}:
-            raise ValueError("side must be one of {'right', 'left'}.")
-        object.__setattr__(self, "side", side)
-
-    def init(self, terms, t0, t1, y0, args) -> None:
-        del terms, t0, t1, y0, args
-        return None
 
     def step(self, terms, t0, t1, y0, args, solver_state, made_jump):
         del args, solver_state, made_jump
@@ -239,9 +229,6 @@ class LinearFer(AbstractSolver[None]):
             side=self.side,
         )
         return y, None, dense_info, None, RESULTS.successful
-
-    def func(self, terms, t0, y0, args):
-        return terms.vf(t0, y0, args)
 
 
 __all__ = ["LinearFer", "LinearMagnus"]
