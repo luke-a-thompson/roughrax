@@ -13,7 +13,7 @@ import pysiglib.jax_api as pysiglib
 import pytest
 from georax import CG2, SO, Euclidean, Manifold
 
-from roughrax import LogODE, RoughTerm, SignatureInterpolation
+from roughrax import HMSigRK3C4, LogODE, RoughTerm, SignatureInterpolation
 from roughrax._bases import (
     PrimitiveBasis,
     make_lyndon_basis,
@@ -37,6 +37,39 @@ class BenchmarkCase:
 
 def rough_vector_field(y):
     return jnp.stack([jnp.cos(y), jnp.sin(y)])
+
+
+class NeuralVectorField(eqx.Module):
+    network: eqx.nn.MLP
+    driver_dimension: int = eqx.field(static=True)
+    state_dimension: int = eqx.field(static=True)
+    scale: float = eqx.field(static=True)
+
+    def __init__(
+        self,
+        *,
+        state_dimension: int,
+        driver_dimension: int,
+        width: int,
+        depth: int,
+        scale: float,
+        key,
+    ):
+        self.network = eqx.nn.MLP(
+            in_size=state_dimension,
+            out_size=driver_dimension * state_dimension,
+            width_size=width,
+            depth=depth,
+            activation=jax.nn.tanh,
+            key=key,
+        )
+        self.driver_dimension = driver_dimension
+        self.state_dimension = state_dimension
+        self.scale = scale
+
+    def __call__(self, y):
+        values = self.scale * self.network(y)
+        return values.reshape(self.driver_dimension, self.state_dimension)
 
 
 def so3_vector_field(y):
@@ -84,16 +117,49 @@ def make_case(
     )
 
 
+EUCLIDEAN_STRATONOVICH_CASE = make_case(
+    dim=2,
+    depth=3,
+    solution="stratonovich",
+    geometry=Euclidean(),
+    vector_field=rough_vector_field,
+    seed=0,
+)
+
+NEURAL_STATE_DIMENSION = 32
+NEURAL_VECTOR_FIELD = NeuralVectorField(
+    state_dimension=NEURAL_STATE_DIMENSION,
+    driver_dimension=2,
+    width=64,
+    depth=2,
+    scale=0.1,
+    key=jax.random.PRNGKey(17),
+)
+
+
+def neural_vector_field(y):
+    return NEURAL_VECTOR_FIELD(y)
+
+
+NEURAL_STRATONOVICH_CASE = make_case(
+    dim=2,
+    depth=3,
+    solution="stratonovich",
+    geometry=Euclidean(),
+    vector_field=neural_vector_field,
+    seed=0,
+)
+NEURAL_Y0 = np.linspace(
+    -0.25,
+    0.25,
+    NEURAL_STATE_DIMENSION,
+    dtype=np.float32,
+)
+
+
 CASES = [
     pytest.param(
-        make_case(
-            dim=2,
-            depth=3,
-            solution="stratonovich",
-            geometry=Euclidean(),
-            vector_field=rough_vector_field,
-            seed=0,
-        ),
+        EUCLIDEAN_STRATONOVICH_CASE,
         id="euclidean-stratonovich",
     ),
     pytest.param(
@@ -277,7 +343,10 @@ def _make_rough_term_coeffs(
     ).control.coeffs
 
 
-def solve_log_ode(case: BenchmarkCase):
+def solve_log_ode(case: BenchmarkCase, y0=None):
+    if y0 is None:
+        y0 = evaluation_state(case)
+    solver = diffrax.Heun() if isinstance(case.geometry, Euclidean) else CG2()
     y1 = _solve_log_ode(
         jnp.asarray(case.ts),
         jnp.asarray(case.ys),
@@ -286,13 +355,81 @@ def solve_log_ode(case: BenchmarkCase):
         case.solution,
         case.geometry,
         case.vector_field,
-        evaluation_state(case),
+        jnp.asarray(y0),
+        solver,
+    )
+    return jax.block_until_ready(y1)
+
+
+def solve_log_ode_order_three(case: BenchmarkCase, y0=None):
+    if y0 is None:
+        y0 = evaluation_state(case)
+    y1 = _solve_log_ode(
+        jnp.asarray(case.ts),
+        jnp.asarray(case.ys),
+        jnp.asarray(case.coarse_ts),
+        case.depth,
+        case.solution,
+        case.geometry,
+        case.vector_field,
+        jnp.asarray(y0),
+        diffrax.Tsit5(),
+    )
+    return jax.block_until_ready(y1)
+
+
+def solve_hm_sigrk3_c4(case: BenchmarkCase, y0=None):
+    if y0 is None:
+        y0 = evaluation_state(case)
+    y1 = _solve_hm_sigrk3_c4(
+        jnp.asarray(case.ts),
+        jnp.asarray(case.ys),
+        jnp.asarray(case.coarse_ts),
+        case.depth,
+        case.solution,
+        case.geometry,
+        case.vector_field,
+        jnp.asarray(y0),
     )
     return jax.block_until_ready(y1)
 
 
 @eqx.filter_jit
 def _solve_log_ode(
+    ts,
+    ys,
+    signature_knots,
+    depth: int,
+    solution: Literal["ito", "stratonovich"],
+    geometry: Manifold,
+    vector_field: Callable,
+    y0,
+    solver,
+):
+    driver = diffrax.LinearInterpolation(ts=ts, ys=ys)
+    control = SignatureInterpolation(
+        driver,
+        signature_knots,
+        depth,
+        solution,
+    )
+    term = RoughTerm(vector_field, control, geometry)
+    sol = diffrax.diffeqsolve(
+        term,
+        LogODE(solver),
+        t0=signature_knots[0],
+        t1=signature_knots[-1],
+        dt0=None,
+        y0=y0,
+        stepsize_controller=diffrax.StepTo(signature_knots),
+        saveat=diffrax.SaveAt(t1=True),
+        max_steps=signature_knots.shape[0] + 4,
+    )
+    return sol.ys[-1]
+
+
+@eqx.filter_jit
+def _solve_hm_sigrk3_c4(
     ts,
     ys,
     signature_knots,
@@ -310,10 +447,9 @@ def _solve_log_ode(
         solution,
     )
     term = RoughTerm(vector_field, control, geometry)
-    solver = diffrax.Heun() if isinstance(geometry, Euclidean) else CG2()
     sol = diffrax.diffeqsolve(
         term,
-        LogODE(solver),
+        HMSigRK3C4(),
         t0=signature_knots[0],
         t1=signature_knots[-1],
         dt0=None,
@@ -351,6 +487,38 @@ def test_benchmark_log_ode_solve(benchmark, case: BenchmarkCase):
     solve_log_ode(case)
     y1 = benchmark(solve_log_ode, case)
     assert y1.shape == evaluation_state(case).shape
+
+
+@pytest.mark.benchmark(group="order-3-stratonovich-solve")
+def test_benchmark_log_ode_order_three_solve(benchmark):
+    case = EUCLIDEAN_STRATONOVICH_CASE
+    solve_log_ode_order_three(case)
+    y1 = benchmark(solve_log_ode_order_three, case)
+    assert y1.shape == evaluation_state(case).shape
+
+
+@pytest.mark.benchmark(group="order-3-stratonovich-solve")
+def test_benchmark_hm_sigrk3_c4_solve(benchmark):
+    case = EUCLIDEAN_STRATONOVICH_CASE
+    solve_hm_sigrk3_c4(case)
+    y1 = benchmark(solve_hm_sigrk3_c4, case)
+    assert y1.shape == evaluation_state(case).shape
+
+
+@pytest.mark.benchmark(group="neural-order-3-stratonovich-solve")
+def test_benchmark_neural_log_ode_heun_solve(benchmark):
+    case = NEURAL_STRATONOVICH_CASE
+    solve_log_ode(case, NEURAL_Y0)
+    y1 = benchmark(solve_log_ode, case, NEURAL_Y0)
+    assert y1.shape == (NEURAL_STATE_DIMENSION,)
+
+
+@pytest.mark.benchmark(group="neural-order-3-stratonovich-solve")
+def test_benchmark_neural_hm_sigrk3_c4_solve(benchmark):
+    case = NEURAL_STRATONOVICH_CASE
+    solve_hm_sigrk3_c4(case, NEURAL_Y0)
+    y1 = benchmark(solve_hm_sigrk3_c4, case, NEURAL_Y0)
+    assert y1.shape == (NEURAL_STATE_DIMENSION,)
 
 
 @pytest.mark.benchmark(group="rough-term")

@@ -1,4 +1,4 @@
-"""HMSigRK3, Log-ODE, and SO(3) convergence against Wong-Zakai references."""
+"""HM-SigRK, Log-ODE, and SO(3) convergence against Wong-Zakai references."""
 
 # ruff: noqa: E402
 
@@ -25,7 +25,7 @@ import matplotlib
 import numpy as np
 from georax import CFEES25, Euclidean, GeometricTerm, SO
 
-from roughrax import HMSigRK3, LogODE, RoughTerm, SignatureInterpolation
+from roughrax import HMSigRK3, HMSigRK3C4, LogODE, RoughTerm, SignatureInterpolation
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -249,7 +249,6 @@ def solve_hm_sigrk3_batch(
     y0: float,
     rho_scale: float,
     beta_scale: float,
-    brownian_chain_correction: bool,
 ) -> np.ndarray:
     coarse_ts, template, coeffs_batch = rough_term_template_and_coeffs(
         ts,
@@ -270,8 +269,38 @@ def solve_hm_sigrk3_batch(
             HMSigRK3(
                 rho_scale=rho_scale,
                 beta_scale=beta_scale,
-                brownian_chain_correction=brownian_chain_correction,
             ),
+        )
+    )
+
+
+def solve_hm_sigrk3_c4_batch(
+    ts: np.ndarray,
+    xs_batch: np.ndarray,
+    *,
+    coarse_exponent: int,
+    fine_exponent: int,
+    y0: float,
+    substeps: int,
+    rho_scale: float,
+) -> np.ndarray:
+    coarse_ts, template, coeffs_batch = rough_term_template_and_coeffs(
+        ts,
+        xs_batch,
+        vector_field=rough_vector_field,
+        geometry=Euclidean(),
+        depth=3,
+        coarse_exponent=coarse_exponent,
+        fine_exponent=fine_exponent,
+        solution="stratonovich",
+    )
+    return to_numpy(
+        solve_rough_from_coeffs_batch(
+            template,
+            coeffs_batch,
+            coarse_ts,
+            jnp.asarray(y0),
+            HMSigRK3C4(substeps=substeps, rho_scale=rho_scale),
         )
     )
 
@@ -373,12 +402,15 @@ def plot_hm_sigrk3_comparison(
     log_ode_order_two_path_errors: np.ndarray,
     log_ode_path_errors: np.ndarray,
     hm_sigrk3_path_errors: np.ndarray,
+    hm_sigrk3_c4_path_errors: np.ndarray,
     log_ode_order_two_endpoint_errors: np.ndarray,
     log_ode_endpoint_errors: np.ndarray,
     hm_sigrk3_endpoint_errors: np.ndarray,
+    hm_sigrk3_c4_endpoint_errors: np.ndarray,
     rho_scale: float,
     beta_scale: float,
-    brownian_chain_correction: bool,
+    c4_rho_scale: float,
+    c4_substeps: int,
     output: Path,
 ) -> None:
     fig, axes = plt.subplots(1, 2, figsize=(10, 4), sharex=True)
@@ -387,12 +419,14 @@ def plot_hm_sigrk3_comparison(
             log_ode_order_two_path_errors,
             log_ode_path_errors,
             hm_sigrk3_path_errors,
+            hm_sigrk3_c4_path_errors,
             "mean max absolute path error",
         ),
         (
             log_ode_order_two_endpoint_errors,
             log_ode_endpoint_errors,
             hm_sigrk3_endpoint_errors,
+            hm_sigrk3_c4_endpoint_errors,
             "mean absolute endpoint error",
         ),
     )
@@ -400,6 +434,7 @@ def plot_hm_sigrk3_comparison(
         log_ode_order_two_errors,
         log_ode_errors,
         hm_sigrk3_errors,
+        hm_sigrk3_c4_errors,
         ylabel,
     ) in zip(axes, metrics, strict=True):
         ax.loglog(
@@ -411,10 +446,24 @@ def plot_hm_sigrk3_comparison(
         )
         ax.loglog(
             h,
+            log_ode_errors,
+            "s-",
+            color="tab:green",
+            label="Log-ODE order 3",
+        )
+        ax.loglog(
+            h,
             hm_sigrk3_errors,
             "+-",
             color="tab:blue",
             label="HMSigRK3",
+        )
+        ax.loglog(
+            h,
+            hm_sigrk3_c4_errors,
+            "x-",
+            color="tab:red",
+            label="HMSigRK3C4",
         )
         ax.loglog(
             h,
@@ -425,7 +474,7 @@ def plot_hm_sigrk3_comparison(
         )
         ax.loglog(
             h,
-            expected_line(h, hm_sigrk3_errors, 1.5),
+            expected_line(h, hm_sigrk3_c4_errors, 1.5),
             color="black",
             linestyle="--",
             label=r"$h^{1.5}$",
@@ -437,8 +486,8 @@ def plot_hm_sigrk3_comparison(
 
     fig.suptitle(
         "Third-order Stratonovich RDE convergence "
-        f"(HMSigRK3 rho={rho_scale:.4g}, beta={beta_scale:.4g}, "
-        f"Brownian correction={brownian_chain_correction})"
+        f"(HM3 rho={rho_scale:.4g}, beta={beta_scale:.4g}; "
+        f"C4 rho={c4_rho_scale:.4g}, substeps={c4_substeps})"
     )
     fig.tight_layout()
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -458,25 +507,32 @@ def print_hm_sigrk3_comparison(
     log_ode_order_two_path_errors: np.ndarray,
     log_ode_path_errors: np.ndarray,
     hm_sigrk3_path_errors: np.ndarray,
+    hm_sigrk3_c4_path_errors: np.ndarray,
     log_ode_order_two_endpoint_errors: np.ndarray,
     log_ode_endpoint_errors: np.ndarray,
     hm_sigrk3_endpoint_errors: np.ndarray,
+    hm_sigrk3_c4_endpoint_errors: np.ndarray,
     rho_scale: float,
     beta_scale: float,
-    brownian_chain_correction: bool,
+    c4_rho_scale: float,
+    c4_substeps: int,
 ) -> None:
     print(
-        "\nHMSigRK3 versus Log-ODE order 3 "
-        f"(rho_scale={rho_scale:.8g}, beta_scale={beta_scale:.8g}, "
-        f"brownian_chain_correction={brownian_chain_correction})"
+        "\nHM-SigRK versus Log-ODE "
+        f"(HM3 rho_scale={rho_scale:.8g}, beta_scale={beta_scale:.8g}; "
+        f"C4 rho_scale={c4_rho_scale:.8g}, substeps={c4_substeps})"
     )
     print("\npath errors")
-    print("step size    LogODE-2    LogODE-3     HMSigRK3  HM/LogODE-2  HM/LogODE-3")
+    print(
+        "step size    LogODE-2    LogODE-3     HMSigRK3   HMSigRK3C4  "
+        "HM3/LogODE-3  C4/LogODE-3"
+    )
     for values in zip(
         h,
         log_ode_order_two_path_errors,
         log_ode_path_errors,
         hm_sigrk3_path_errors,
+        hm_sigrk3_c4_path_errors,
         strict=True,
     ):
         (
@@ -484,23 +540,29 @@ def print_hm_sigrk3_comparison(
             log_ode_order_two_path,
             log_ode_path,
             hm_sigrk3_path,
+            hm_sigrk3_c4_path,
         ) = values
         print(
             f"{step_size:9.3e}  "
             f"{log_ode_order_two_path:11.4e}  "
             f"{log_ode_path:11.4e}  "
             f"{hm_sigrk3_path:11.4e}  "
-            f"{hm_sigrk3_path / log_ode_order_two_path:11.2f}  "
-            f"{hm_sigrk3_path / log_ode_path:10.2f}"
+            f"{hm_sigrk3_c4_path:11.4e}  "
+            f"{hm_sigrk3_path / log_ode_path:12.2f}  "
+            f"{hm_sigrk3_c4_path / log_ode_path:11.2f}"
         )
 
     print("\nendpoint errors")
-    print("step size    LogODE-2    LogODE-3     HMSigRK3  HM/LogODE-2  HM/LogODE-3")
+    print(
+        "step size    LogODE-2    LogODE-3     HMSigRK3   HMSigRK3C4  "
+        "HM3/LogODE-3  C4/LogODE-3"
+    )
     for values in zip(
         h,
         log_ode_order_two_endpoint_errors,
         log_ode_endpoint_errors,
         hm_sigrk3_endpoint_errors,
+        hm_sigrk3_c4_endpoint_errors,
         strict=True,
     ):
         (
@@ -508,14 +570,16 @@ def print_hm_sigrk3_comparison(
             log_ode_order_two_endpoint,
             log_ode_endpoint,
             hm_sigrk3_endpoint,
+            hm_sigrk3_c4_endpoint,
         ) = values
         print(
             f"{step_size:9.3e}  "
             f"{log_ode_order_two_endpoint:11.4e}  "
             f"{log_ode_endpoint:11.4e}  "
             f"{hm_sigrk3_endpoint:11.4e}  "
-            f"{hm_sigrk3_endpoint / log_ode_order_two_endpoint:11.2f}  "
-            f"{hm_sigrk3_endpoint / log_ode_endpoint:10.2f}"
+            f"{hm_sigrk3_c4_endpoint:11.4e}  "
+            f"{hm_sigrk3_endpoint / log_ode_endpoint:12.2f}  "
+            f"{hm_sigrk3_c4_endpoint / log_ode_endpoint:11.2f}"
         )
 
     finest = slice(-min(3, h.size), None)
@@ -525,9 +589,11 @@ def print_hm_sigrk3_comparison(
         ("Log-ODE-2", "path", log_ode_order_two_path_errors),
         ("Log-ODE-3", "path", log_ode_path_errors),
         ("HMSigRK3", "path", hm_sigrk3_path_errors),
+        ("HMSigRK3C4", "path", hm_sigrk3_c4_path_errors),
         ("Log-ODE-2", "endpoint", log_ode_order_two_endpoint_errors),
         ("Log-ODE-3", "endpoint", log_ode_endpoint_errors),
         ("HMSigRK3", "endpoint", hm_sigrk3_endpoint_errors),
+        ("HMSigRK3C4", "endpoint", hm_sigrk3_c4_endpoint_errors),
     ):
         print(
             f"{method:10s}   {metric:8s}   "
@@ -560,20 +626,17 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path(__file__).resolve().parent
         / "outputs"
-        / "hm_sigrk3_vs_log_ode_convergence.png",
+        / "hm_sigrk3_c4_vs_log_ode_convergence.png",
     )
     parser.add_argument(
         "--comparison-only",
         action="store_true",
-        help="Only run the Euclidean HMSigRK3 versus Log-ODE comparison.",
+        help="Only run the Euclidean HM-SigRK versus Log-ODE comparison.",
     )
     parser.add_argument("--hm-rho-scale", type=float, default=1.0)
     parser.add_argument("--hm-beta-scale", type=float, default=1.0)
-    parser.add_argument(
-        "--hm-brownian-chain-correction",
-        action="store_true",
-        help="Enable HMSigRK3's Brownian-specific fourth-degree chain correction.",
-    )
+    parser.add_argument("--hm-c4-rho-scale", type=float, default=1.0)
+    parser.add_argument("--hm-c4-substeps", type=int, default=2)
     return parser.parse_args()
 
 
@@ -581,6 +644,8 @@ def main() -> None:
     args = parse_args()
     if args.num_paths < 1:
         raise ValueError("--num-paths must be at least 1.")
+    if args.hm_c4_substeps < 1:
+        raise ValueError("--hm-c4-substeps must be at least 1.")
     if any(k >= args.fine_exponent for k in args.coarse_exponents):
         raise ValueError("Every coarse exponent must be smaller than --fine-exponent.")
 
@@ -594,6 +659,7 @@ def main() -> None:
         for depth in (1, 2, 3)
     }
     hm_sigrk3_errors = np.zeros(len(args.coarse_exponents), dtype=np.float64)
+    hm_sigrk3_c4_errors = np.zeros(len(args.coarse_exponents), dtype=np.float64)
     log_ode_order_two_endpoint_errors = np.zeros(
         len(args.coarse_exponents), dtype=np.float64
     )
@@ -601,6 +667,9 @@ def main() -> None:
         len(args.coarse_exponents), dtype=np.float64
     )
     hm_sigrk3_endpoint_errors = np.zeros(len(args.coarse_exponents), dtype=np.float64)
+    hm_sigrk3_c4_endpoint_errors = np.zeros(
+        len(args.coarse_exponents), dtype=np.float64
+    )
     print(
         f"sampling {args.num_paths} Brownian paths on "
         f"{2**args.fine_exponent} fine steps"
@@ -676,13 +745,27 @@ def main() -> None:
             y0=args.y0,
             rho_scale=args.hm_rho_scale,
             beta_scale=args.hm_beta_scale,
-            brownian_chain_correction=args.hm_brownian_chain_correction,
         )
         step = 2 ** (args.fine_exponent - k)
         path_errors = np.max(np.abs(y - y_refs[:, ::step]), axis=1)
         hm_sigrk3_errors[i] = float(np.mean(path_errors))
         endpoint_errors = np.abs(y[:, -1] - y_refs[:, -1])
         hm_sigrk3_endpoint_errors[i] = float(np.mean(endpoint_errors))
+
+        print(f"solving HMSigRK3C4 on {2**k} steps for {args.num_paths} paths")
+        y = solve_hm_sigrk3_c4_batch(
+            ts,
+            xs_batch,
+            coarse_exponent=k,
+            fine_exponent=args.fine_exponent,
+            y0=args.y0,
+            substeps=args.hm_c4_substeps,
+            rho_scale=args.hm_c4_rho_scale,
+        )
+        path_errors = np.max(np.abs(y - y_refs[:, ::step]), axis=1)
+        hm_sigrk3_c4_errors[i] = float(np.mean(path_errors))
+        endpoint_errors = np.abs(y[:, -1] - y_refs[:, -1])
+        hm_sigrk3_c4_endpoint_errors[i] = float(np.mean(endpoint_errors))
 
     mean_stratonovich_errors_by_depth = {
         depth: np.maximum(errors, np.finfo(np.float64).tiny)
@@ -693,6 +776,10 @@ def main() -> None:
         for depth, errors in ito_errors_by_depth.items()
     }
     mean_hm_sigrk3_errors = np.maximum(hm_sigrk3_errors, np.finfo(np.float64).tiny)
+    mean_hm_sigrk3_c4_errors = np.maximum(
+        hm_sigrk3_c4_errors,
+        np.finfo(np.float64).tiny,
+    )
     mean_log_ode_order_three_endpoint_errors = np.maximum(
         log_ode_order_three_endpoint_errors,
         np.finfo(np.float64).tiny,
@@ -705,37 +792,48 @@ def main() -> None:
         hm_sigrk3_endpoint_errors,
         np.finfo(np.float64).tiny,
     )
+    mean_hm_sigrk3_c4_endpoint_errors = np.maximum(
+        hm_sigrk3_c4_endpoint_errors,
+        np.finfo(np.float64).tiny,
+    )
     print_hm_sigrk3_comparison(
         h,
         log_ode_order_two_path_errors=mean_stratonovich_errors_by_depth[2],
         log_ode_path_errors=mean_stratonovich_errors_by_depth[3],
         hm_sigrk3_path_errors=mean_hm_sigrk3_errors,
+        hm_sigrk3_c4_path_errors=mean_hm_sigrk3_c4_errors,
         log_ode_order_two_endpoint_errors=mean_log_ode_order_two_endpoint_errors,
         log_ode_endpoint_errors=mean_log_ode_order_three_endpoint_errors,
         hm_sigrk3_endpoint_errors=mean_hm_sigrk3_endpoint_errors,
+        hm_sigrk3_c4_endpoint_errors=mean_hm_sigrk3_c4_endpoint_errors,
         rho_scale=args.hm_rho_scale,
         beta_scale=args.hm_beta_scale,
-        brownian_chain_correction=args.hm_brownian_chain_correction,
+        c4_rho_scale=args.hm_c4_rho_scale,
+        c4_substeps=args.hm_c4_substeps,
     )
     plot_hm_sigrk3_comparison(
         h,
         log_ode_order_two_path_errors=mean_stratonovich_errors_by_depth[2],
         log_ode_path_errors=mean_stratonovich_errors_by_depth[3],
         hm_sigrk3_path_errors=mean_hm_sigrk3_errors,
+        hm_sigrk3_c4_path_errors=mean_hm_sigrk3_c4_errors,
         log_ode_order_two_endpoint_errors=mean_log_ode_order_two_endpoint_errors,
         log_ode_endpoint_errors=mean_log_ode_order_three_endpoint_errors,
         hm_sigrk3_endpoint_errors=mean_hm_sigrk3_endpoint_errors,
+        hm_sigrk3_c4_endpoint_errors=mean_hm_sigrk3_c4_endpoint_errors,
         rho_scale=args.hm_rho_scale,
         beta_scale=args.hm_beta_scale,
-        brownian_chain_correction=args.hm_brownian_chain_correction,
+        c4_rho_scale=args.hm_c4_rho_scale,
+        c4_substeps=args.hm_c4_substeps,
         output=args.comparison_output,
     )
     print(f"saved {args.comparison_output}")
-    stages = HMSigRK3.num_stages(
-        2,
-        brownian_chain_correction=args.hm_brownian_chain_correction,
+    print(f"HMSigRK3 stages for d=2: {HMSigRK3.num_stages(2)}")
+    print(
+        "HMSigRK3C4 stages for d=2: "
+        f"{HMSigRK3C4.num_stages(2, substeps=args.hm_c4_substeps)} "
+        f"in {HMSigRK3C4.num_sequential_batches(args.hm_c4_substeps)} batches"
     )
-    print(f"HMSigRK3 stages for d=2: {stages}")
     if args.comparison_only:
         return
 
@@ -819,7 +917,7 @@ def main() -> None:
                 "Log-ODE Stratonovich",
                 "max absolute path error",
                 mean_stratonovich_errors_by_depth,
-                {3: ("HMSigRK3", mean_hm_sigrk3_errors)},
+                {3: ("HMSigRK3C4", mean_hm_sigrk3_c4_errors)},
             ),
             (
                 "Log-ODE branched Ito",

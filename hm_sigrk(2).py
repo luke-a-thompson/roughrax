@@ -165,10 +165,12 @@ def _method_one_log_to_tensor_map(dimension: int):
             }
         )
 
-    expanded_coordinates: defaultdict[tuple[int, ...], defaultdict[int, int]] = (
-        defaultdict(lambda: defaultdict(int))
-    )
-    for expansion, coordinate in zip(expansions, bracket_coordinates, strict=True):
+    expanded_coordinates: defaultdict[
+        tuple[int, ...], defaultdict[int, int]
+    ] = defaultdict(lambda: defaultdict(int))
+    for expansion, coordinate in zip(
+        expansions, bracket_coordinates, strict=True
+    ):
         for word, expansion_coefficient in expansion.items():
             for input_index, coordinate_coefficient in coordinate.items():
                 expanded_coordinates[word][input_index] += (
@@ -181,7 +183,9 @@ def _method_one_log_to_tensor_map(dimension: int):
     for degree in range(1, 4):
         for word in product(range(dimension), repeat=degree):
             output_index = _flat_word_index(word, dimension)
-            for input_index, value in sorted(expanded_coordinates[word].items()):
+            for input_index, value in sorted(
+                expanded_coordinates[word].items()
+            ):
                 if value != 0:
                     output_indices.append(output_index)
                     input_indices.append(input_index)
@@ -197,8 +201,8 @@ def _method_one_log_to_tensor_map(dimension: int):
 
 def _expanded_tensor_log_level_three(term: RoughTerm, log_signature):
     dimension = term.basis.dim
-    output_indices, input_indices, values, log_size = _method_one_log_to_tensor_map(
-        dimension
+    output_indices, input_indices, values, log_size = (
+        _method_one_log_to_tensor_map(dimension)
     )
     tensor_size = dimension + dimension**2 + dimension**3
 
@@ -224,8 +228,8 @@ def _expanded_tensor_log_level_three(term: RoughTerm, log_signature):
 
 def _tensor_signature_levels_four(term: RoughTerm, log_signature):
     """Canonical signature completion ``exp(log_signature[:3])`` through level 4."""
-    log_level_one, log_level_two, log_level_three = _expanded_tensor_log_level_three(
-        term, log_signature
+    log_level_one, log_level_two, log_level_three = (
+        _expanded_tensor_log_level_three(term, log_signature)
     )
 
     level_one = log_level_one
@@ -276,7 +280,9 @@ def _moment_weights(
 ):
     """Build the legacy homogeneous quadratic-cloud weights."""
     dimension = level_one.shape[0]
-    cloud, pair_left, pair_right = _quadratic_cloud(dimension, level_one.dtype)
+    cloud, pair_left, pair_right = _quadratic_cloud(
+        dimension, level_one.dtype
+    )
 
     base_rho = jnp.maximum(
         jnp.max(jnp.abs(level_one)),
@@ -288,10 +294,14 @@ def _moment_weights(
     rho = rho_scale * base_rho
     safe_rho = jnp.where(rho > 0, rho, jnp.ones_like(rho))
 
-    beta = beta_scale * jnp.cbrt(jnp.max(jnp.abs(level_three), axis=(0, 1)))
+    beta = beta_scale * jnp.cbrt(
+        jnp.max(jnp.abs(level_three), axis=(0, 1))
+    )
     safe_beta = jnp.where(beta > 0, beta, jnp.ones_like(beta))
 
-    zeta = jnp.einsum("qlk->kl", level_three) / (safe_beta[:, None] * safe_rho**2)
+    zeta = jnp.einsum("qlk->kl", level_three) / (
+        safe_beta[:, None] * safe_rho**2
+    )
 
     mu_zero = (level_one - beta) / safe_rho
     mu_one = jnp.swapaxes(level_two, 0, 1) / safe_rho**2
@@ -308,7 +318,11 @@ def _moment_weights(
 
     diagonal = jnp.diagonal(mu_two, axis1=1, axis2=2)
     twice_axis_weights = 0.5 * (diagonal - mu_one)
-    axis_weights = 2 * mu_one - diagonal - (jnp.sum(mu_two, axis=2) - diagonal)
+    axis_weights = (
+        2 * mu_one
+        - diagonal
+        - (jnp.sum(mu_two, axis=2) - diagonal)
+    )
 
     if pair_left.size:
         pair_weights = mu_two[:, pair_left, pair_right]
@@ -395,13 +409,14 @@ def _hm_sigrk3_step(
     return y0 + core_increment + carrier_increment
 
 
-def _hm_sigrk3_c4_step_data(
+def _hm_sigrk3_c4_single_step(
     term: RoughTerm,
     log_signature,
+    y0,
     rho_scale: float,
 ):
-    level_one, level_two, level_three, level_four = _tensor_signature_levels_four(
-        term, log_signature
+    level_one, level_two, level_three, level_four = (
+        _tensor_signature_levels_four(term, log_signature)
     )
     base_rho = jnp.maximum(
         jnp.max(jnp.abs(level_one)),
@@ -432,32 +447,13 @@ def _hm_sigrk3_c4_step_data(
     solve = jnp.asarray(data.solve, dtype=tensor_signature.dtype)
     update_weights = solve @ moments
     a = jnp.asarray(data.a, dtype=tensor_signature.dtype)
-    return rho, update_weights, a, data.layer_bounds
-
-
-def _hm_sigrk3_c4_apply_step(
-    term: RoughTerm,
-    y0,
-    rho,
-    update_weights,
-    a,
-    layer_bounds: tuple[int, int, int, int],
-):
-    """Apply one C4 tableau using precomputed signature-dependent data."""
 
     def fields_at(y):
         return _normalise_vector_fields(term, y)
 
-    fields_at_y0 = _normalise_vector_fields(term, y0)
-    fields = (
-        jnp.zeros(
-            (a.shape[0], *fields_at_y0.shape),
-            dtype=fields_at_y0.dtype,
-        )
-        .at[0]
-        .set(fields_at_y0)
-    )
-    for start, stop in zip(layer_bounds[:-1], layer_bounds[1:], strict=True):
+    fields = _normalise_vector_fields(term, y0)[None, ...]
+    bounds = data.layer_bounds
+    for start, stop in zip(bounds[:-1], bounds[1:], strict=True):
         layer_displacements = jnp.einsum(
             "ijd,jd...->i...",
             a[start:stop, :start, :],
@@ -465,7 +461,7 @@ def _hm_sigrk3_c4_apply_step(
         )
         layer_stages = y0 + rho * layer_displacements
         layer_fields = jax.vmap(fields_at)(layer_stages)
-        fields = fields.at[start:stop].set(layer_fields)
+        fields = jnp.concatenate([fields, layer_fields], axis=0)
 
     increment = rho * jnp.einsum(
         "ik,ik...->...",
@@ -504,7 +500,10 @@ class HMSigRK3(AbstractStratonovichSolver[None]):
     def num_stages(driver_dimension: int) -> int:
         if driver_dimension < 1:
             raise ValueError("driver_dimension must be positive.")
-        return (driver_dimension + 1) * (driver_dimension + 2) // 2 + driver_dimension
+        return (
+            (driver_dimension + 1) * (driver_dimension + 2) // 2
+            + driver_dimension
+        )
 
     def init(self, terms, t0, t1, y0, args) -> None:
         del t0, t1, y0, args
@@ -599,21 +598,16 @@ class HMSigRK3C4(AbstractStratonovichSolver[None]):
         del args, solver_state, made_jump
         rough_term = unwrap_rough_term(terms)
         log_signature = terms.contr(t0, t1) / self.substeps
-        rho, update_weights, a, layer_bounds = _hm_sigrk3_c4_step_data(
-            rough_term,
-            log_signature,
-            self.rho_scale,
-        )
-        y1 = y0
-        for _ in range(self.substeps):
-            y1 = _hm_sigrk3_c4_apply_step(
+
+        def body(_, y):
+            return _hm_sigrk3_c4_single_step(
                 rough_term,
-                y1,
-                rho,
-                update_weights,
-                a,
-                layer_bounds,
+                log_signature,
+                y,
+                self.rho_scale,
             )
+
+        y1 = jax.lax.fori_loop(0, self.substeps, body, y0)
         return y1, None, dict(y0=y0, y1=y1), None, RESULTS.successful
 
     def func(self, terms, t0, y0, args):

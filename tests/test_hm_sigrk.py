@@ -7,7 +7,7 @@ import jax.numpy as jnp
 import pytest
 from georax import Euclidean
 
-from roughrax import HMSigRK3, RoughTerm, SignatureInterpolation
+from roughrax import HMSigRK3, HMSigRK3C4, RoughTerm, SignatureInterpolation
 
 
 jax.config.update("jax_enable_x64", True)
@@ -39,7 +39,9 @@ def _scaled_path(scale):
     )
 
 
-def _solve_hm(path, y0):
+def _solve_hm(path, y0, solver=None):
+    if solver is None:
+        solver = HMSigRK3()
     fine_ts = jnp.linspace(0.0, 1.0, path.shape[0])
     signature_knots = jnp.asarray([0.0, 1.0], dtype=fine_ts.dtype)
     driver = diffrax.LinearInterpolation(ts=fine_ts, ys=path)
@@ -52,7 +54,7 @@ def _solve_hm(path, y0):
     term = RoughTerm(_rough_vector_field, control, Euclidean())
     sol = diffrax.diffeqsolve(
         term,
-        HMSigRK3(),
+        solver,
         t0=signature_knots[0],
         t1=signature_knots[-1],
         dt0=None,
@@ -106,7 +108,22 @@ def test_hm_sigrk3_is_filter_jit_safe():
     assert jnp.isfinite(y1)
 
 
-def test_hm_sigrk3_is_exact_for_constant_vector_fields():
+def test_hm_sigrk3_c4_is_filter_jit_safe():
+    @eqx.filter_jit
+    def solve(path, y0):
+        return _solve_hm(path, y0, HMSigRK3C4())
+
+    y1 = solve(_scaled_path(0.25), jnp.asarray(0.25, dtype=jnp.float64))
+    assert y1.shape == ()
+    assert jnp.isfinite(y1)
+
+
+@pytest.mark.parametrize(
+    "solver",
+    [HMSigRK3(), HMSigRK3C4(substeps=1)],
+    ids=["degree-three", "degree-four-completion"],
+)
+def test_hm_sigrk_is_exact_for_constant_vector_fields(solver):
     constant_fields = jnp.asarray([1.2, -0.7], dtype=jnp.float64)
 
     def vector_field(y):
@@ -126,7 +143,7 @@ def test_hm_sigrk3_is_exact_for_constant_vector_fields():
     y0 = jnp.asarray(-0.3, dtype=jnp.float64)
     sol = diffrax.diffeqsolve(
         term,
-        HMSigRK3(),
+        solver,
         t0=signature_knots[0],
         t1=signature_knots[-1],
         dt0=None,
@@ -160,6 +177,24 @@ def test_hm_sigrk3_stage_count():
     assert HMSigRK3.num_stages(3) == 13
     with pytest.raises(ValueError, match="positive"):
         HMSigRK3.num_stages(0)
+
+
+def test_hm_sigrk3_c4_stage_count_and_configuration():
+    solver = HMSigRK3C4(substeps=4, rho_scale=0.75)
+    assert solver.substeps == 4
+    assert solver.rho_scale == 0.75
+    assert HMSigRK3C4.stages_per_substep(2) == 48
+    assert HMSigRK3C4.num_stages(2) == 96
+    assert HMSigRK3C4.num_stages(2, substeps=4) == 192
+    assert HMSigRK3C4.num_sequential_batches() == 6
+    assert HMSigRK3C4.num_sequential_batches(substeps=4) == 12
+
+    for value in (0, -1, 1.5):
+        with pytest.raises(ValueError, match="substeps"):
+            HMSigRK3C4(substeps=value)
+    for value in (0.0, -1.0, float("inf"), float("nan")):
+        with pytest.raises(ValueError, match="rho_scale"):
+            HMSigRK3C4(rho_scale=value)
 
 
 def test_hm_sigrk3_stage_scales_are_exposed_and_validated():
