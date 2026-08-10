@@ -234,3 +234,18 @@ Solves a 2D rough ODE driven by Brownian motion at orders 1, 2, 3 against a fine
 ## Sphere example
 
 ![Brownian motion on a visible spherical cap solved with GeometricEuler and LogODE](docs/examples/outputs/worm_sphere_sde_side_by_side.gif)
+
+## Citation
+If you use roughrax, please cite:
+
+```bibtex
+@article{thompson2026learningmanifolditodynamics,
+      title={Learning Manifold and It\^o Dynamics with Branched Neural Rough Differential Equations}, 
+      author={Luke Thompson and Dai Shi and Lequan Lin and Junbin Gao and Andi Han},
+      year={2026},
+      eprint={2606.05272},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG},
+      url={https://arxiv.org/abs/2606.05272}, 
+}
+```
