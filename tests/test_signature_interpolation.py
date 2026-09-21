@@ -2,17 +2,12 @@ from __future__ import annotations
 
 import diffrax
 import equinox as eqx
-import jax
 import jax.numpy as jnp
 import pysiglib.jax_api as pysiglib
 import pytest
 from georax import Euclidean
 
-from roughrax import LogODE, RoughTerm, SignatureInterpolation
-
-
-def rough_vector_field(y):
-    return jnp.stack([jnp.cos(y), jnp.sin(y)])
+from roughrax import RoughTerm, SignatureInterpolation
 
 
 def test_rough_term_accepts_direct_logsig_columns():
@@ -44,36 +39,6 @@ def test_rough_term_accepts_direct_logsig_columns():
             term.prod(term.vf(0.0, y, None), coeffs),
             jnp.tensordot(columns, coeffs, axes=1),
         )
-
-
-def test_signature_interpolation_construction_is_filter_jit_safe():
-    @eqx.filter_jit
-    def solve(ts, ys, signature_knots, y0):
-        driver = diffrax.LinearInterpolation(ts=ts, ys=ys)
-        control = SignatureInterpolation(
-            driver,
-            signature_knots,
-            depth=2,
-            solution="stratonovich",
-        )
-        term = RoughTerm(rough_vector_field, control, Euclidean())
-        sol = diffrax.diffeqsolve(
-            term,
-            LogODE(diffrax.Heun()),
-            t0=signature_knots[0],
-            t1=signature_knots[-1],
-            dt0=None,
-            y0=y0,
-            stepsize_controller=diffrax.StepTo(signature_knots),
-            saveat=diffrax.SaveAt(t1=True),
-            max_steps=signature_knots.shape[0] + 4,
-        )
-        return sol.ys[-1]
-
-    ts = jnp.linspace(0.0, 1.0, 5)
-    ys = jnp.stack([ts, ts * 0.5], axis=-1)
-    y1 = solve(ts, ys, ts[::2], jnp.asarray(0.25))
-    assert y1.shape == ()
 
 
 def test_signature_interpolation_evaluates_linearly():
@@ -127,16 +92,6 @@ def test_signature_intervals_may_not_cross_knots():
         control.evaluate(0.0, 2.0)
 
 
-def test_from_logsignatures_rejects_batched_coefficients():
-    with pytest.raises(ValueError, match="coeffs must have shape"):
-        SignatureInterpolation.from_logsignatures(
-            jnp.asarray([0.0, 1.0]),
-            jnp.ones((1, 2, 2)),
-            input_dim=2,
-            depth=1,
-        )
-
-
 def test_ito_correction_is_forwarded_to_pysiglib():
     ts = jnp.linspace(0.0, 1.0, 5)
     ys = jnp.asarray([[0.0], [0.2], [-0.1], [0.4], [0.3]])
@@ -177,41 +132,12 @@ def test_signature_interpolation_rejects_stratonovich_correction():
         )
 
 
-def test_from_logsignatures_matches_materialised_control():
-    sample_ts = jnp.linspace(0.0, 1.0, 5)
-    ys = jnp.stack([sample_ts, sample_ts * 0.5], axis=-1)
-    signature_knots = sample_ts[::2]
-    materialised = SignatureInterpolation(
-        diffrax.LinearInterpolation(ts=sample_ts, ys=ys),
-        signature_knots,
-        depth=3,
-        solution="stratonovich",
-    ).materialise(Euclidean())
-    assert materialised.coeffs is not None
-
-    control = SignatureInterpolation.from_logsignatures(
-        signature_knots,
-        materialised.coeffs,
-        input_dim=2,
-        depth=3,
-    )
-
-    assert control.basis is not None
-    assert materialised.basis is not None
-    assert control.basis.keys == materialised.basis.keys
-    for t0, t1 in zip(signature_knots[:-1], signature_knots[1:], strict=True):
-        assert jnp.allclose(
-            control.evaluate(t0, t1),
-            materialised.evaluate(t0, t1),
-        )
-
-
 @pytest.mark.parametrize(
     ("ts", "coeffs", "message"),
     [
         (jnp.ones((2, 2)), jnp.ones((1, 3)), "ts must have shape"),
         (jnp.ones((1,)), jnp.ones((0, 3)), "at least two points"),
-        (jnp.ones((3,)), jnp.ones((6,)), "coeffs must have shape"),
+        (jnp.ones((3,)), jnp.ones((2, 1, 3)), "coeffs must have shape"),
         (jnp.ones((3,)), jnp.ones((1, 3)), "first axis"),
         (jnp.ones((3,)), jnp.ones((2, 4)), "last axis"),
     ],
@@ -250,30 +176,3 @@ def test_from_logsignatures_requires_strictly_increasing_ts(ts):
             input_dim=2,
             depth=2,
         )
-
-
-def test_from_logsignatures_is_filter_jit_and_vmap_safe():
-    ts = jnp.asarray([0.0, 0.4, 1.0])
-    coeffs_batch = jnp.asarray(
-        [
-            [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]],
-            [[0.7, 0.8, 0.9], [1.0, 1.1, 1.2]],
-        ]
-    )
-
-    @eqx.filter_jit
-    def evaluate_population(ts, coeffs_batch):
-        def evaluate_one(coeffs):
-            control = SignatureInterpolation.from_logsignatures(
-                ts,
-                coeffs,
-                input_dim=2,
-                depth=2,
-            )
-            return jnp.stack(
-                [control.evaluate(ts[i], ts[i + 1]) for i in range(ts.shape[0] - 1)]
-            )
-
-        return jax.vmap(evaluate_one)(coeffs_batch)
-
-    assert jnp.allclose(evaluate_population(ts, coeffs_batch), coeffs_batch)

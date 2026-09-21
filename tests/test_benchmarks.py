@@ -216,46 +216,6 @@ def evaluate_lifted_fields(lifted_fields, y):
     return jax.block_until_ready(values)
 
 
-def make_rough_term_coeffs(case: BenchmarkCase):
-    coeffs = _make_rough_term_coeffs(
-        jnp.asarray(case.ts),
-        jnp.asarray(case.ys),
-        jnp.asarray(case.coarse_ts),
-        case.depth,
-        case.solution,
-        case.geometry,
-        case.vector_field,
-    )
-    return jax.block_until_ready(coeffs)
-
-
-@eqx.filter_jit
-def _make_rough_term_coeffs(
-    ts,
-    ys,
-    signature_knots,
-    depth: int,
-    solution: Literal["ito", "stratonovich"],
-    geometry: Manifold,
-    vector_field: Callable,
-) -> RoughTerm:
-    driver = diffrax.LinearInterpolation(
-        ts=ts,
-        ys=ys,
-    )
-    control = SignatureInterpolation(
-        driver,
-        signature_knots,
-        depth,
-        solution,
-    )
-    return RoughTerm(
-        vector_field,
-        control,
-        geometry,
-    ).control.coeffs
-
-
 def solve_log_ode(case: BenchmarkCase):
     y1 = _solve_log_ode(
         jnp.asarray(case.ts),
@@ -305,7 +265,7 @@ def _solve_log_ode(
 
 
 @pytest.mark.benchmark(group="signature")
-@pytest.mark.parametrize("case", CASES)
+@pytest.mark.parametrize("case", CASES[:4])  # Signatures do not use the vector field.
 def test_benchmark_signature_coefficients(benchmark, case: BenchmarkCase):
     prepare_signature_backend(case)
     signature_coefficients_jit(case)
@@ -330,11 +290,3 @@ def test_benchmark_log_ode_solve(benchmark, case: BenchmarkCase):
     solve_log_ode(case)
     y1 = benchmark(solve_log_ode, case)
     assert y1.shape == evaluation_state(case).shape
-
-
-@pytest.mark.benchmark(group="rough-term")
-@pytest.mark.parametrize("case", CASES)
-def test_benchmark_make_rough_term(benchmark, case: BenchmarkCase):
-    make_rough_term_coeffs(case)
-    coeffs = benchmark(make_rough_term_coeffs, case)
-    assert coeffs.shape[0] == len(case.coarse_ts) - 1

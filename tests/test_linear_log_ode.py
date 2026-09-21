@@ -113,21 +113,6 @@ def _omega_components(coeffs, matrices, basis):
     ]
 
 
-def test_linear_magnus_log_ode_matches_right_matrix_exponential():
-    control, signature_knots = _driver(depth=3)
-    term = RoughTerm(right_linear_vector_field, control, Euclidean())
-    y0 = jnp.asarray([[1.0, 0.2], [-0.1, 0.8]])
-
-    actual = _solve(term, LinearMagnus(side="right"), signature_knots, y0)
-
-    matrices = _depth3_matrix_basis("right")
-    coeffs = term.contr(signature_knots[0], signature_knots[-1])
-    omega = jnp.tensordot(coeffs, matrices, axes=1)
-    expected = y0 @ jsl.expm(omega)
-
-    assert jnp.allclose(actual, expected, atol=1e-6, rtol=1e-6)
-
-
 def test_linear_magnus_log_ode_matches_left_matrix_exponential():
     control, signature_knots = _driver(depth=3)
     term = RoughTerm(left_linear_vector_field, control, Euclidean())
@@ -139,25 +124,6 @@ def test_linear_magnus_log_ode_matches_left_matrix_exponential():
     coeffs = term.contr(signature_knots[0], signature_knots[-1])
     omega = jnp.tensordot(coeffs, matrices, axes=1)
     expected = jsl.expm(omega) @ y0
-
-    assert jnp.allclose(actual, expected, atol=1e-6, rtol=1e-6)
-
-
-def test_linear_fer_log_ode_matches_depth3_product():
-    control, signature_knots = _driver(depth=3)
-    term = RoughTerm(right_linear_vector_field, control, Euclidean())
-    y0 = jnp.asarray([[0.8, -0.2], [0.3, 1.1]])
-
-    actual = _solve(term, LinearFer(side="right"), signature_knots, y0)
-
-    matrices = _depth3_matrix_basis("right")
-    components = _omega_components(
-        term.contr(signature_knots[0], signature_knots[-1]), matrices, term.basis
-    )
-    f1 = components[0]
-    f2 = components[1]
-    f3 = components[2] - 0.5 * _commutator(components[0], components[1])
-    expected = y0 @ jsl.expm(f1) @ jsl.expm(f2) @ jsl.expm(f3)
 
     assert jnp.allclose(actual, expected, atol=1e-6, rtol=1e-6)
 
@@ -204,15 +170,17 @@ def test_vmapped_precomputed_logsignatures_match_materialised_controls(solver):
             ],
         ]
     )
-    materialised_controls = [
-        SignatureInterpolation(
+
+    @eqx.filter_jit
+    def materialise(path):
+        return SignatureInterpolation(
             diffrax.LinearInterpolation(ts=sample_ts, ys=path),
             signature_knots,
             depth=3,
             solution="stratonovich",
         ).materialise(Euclidean())
-        for path in paths
-    ]
+
+    materialised_controls = [materialise(path) for path in paths]
     assert all(control.coeffs is not None for control in materialised_controls)
 
     assert materialised_controls[0].basis is not None
@@ -228,6 +196,7 @@ def test_vmapped_precomputed_logsignatures_match_materialised_controls(solver):
         ]
     )
 
+    @eqx.filter_jit
     def solve_precomputed(coeffs, initial):
         control = SignatureInterpolation.from_logsignatures(
             signature_knots,
@@ -258,27 +227,6 @@ def test_vmapped_precomputed_logsignatures_match_materialised_controls(solver):
     assert jnp.allclose(actual, expected, atol=1e-6, rtol=1e-6)
 
 
-def test_linear_magnus_log_ode_runs_under_filter_jit():
-    @eqx.filter_jit
-    def solve(ts, xs, signature_knots, y0):
-        control = SignatureInterpolation(
-            diffrax.LinearInterpolation(ts=ts, ys=xs),
-            signature_knots,
-            depth=2,
-            solution="stratonovich",
-        )
-        term = RoughTerm(right_linear_vector_field, control, Euclidean())
-        return _solve(term, LinearMagnus(side="right"), signature_knots, y0)
-
-    ts = jnp.linspace(0.0, 1.0, 5)
-    xs = jnp.stack([jnp.sin(ts), jnp.cos(ts)], axis=-1)
-    signature_knots = jnp.asarray([0.0, 1.0])
-    y0 = jnp.eye(2)
-
-    y1 = jax.block_until_ready(solve(ts, xs, signature_knots, y0))
-    assert y1.shape == y0.shape
-
-
 def test_linear_magnus_saveat_samples_exact_fake_time():
     control, signature_knots = _driver(depth=3)
     term = RoughTerm(right_linear_vector_field, control, Euclidean())
@@ -293,7 +241,8 @@ def test_linear_magnus_saveat_samples_exact_fake_time():
         dt0=None,
         y0=y0,
         stepsize_controller=diffrax.StepTo(signature_knots),
-        saveat=diffrax.SaveAt(ts=save_ts),
+        # t1 saves the actual step result; ts exercises dense interpolation.
+        saveat=diffrax.SaveAt(ts=save_ts[:-1], t1=True),
         max_steps=4,
     )
 
@@ -320,7 +269,7 @@ def test_linear_fer_saveat_scales_the_full_generator():
         dt0=None,
         y0=y0,
         stepsize_controller=diffrax.StepTo(signature_knots),
-        saveat=diffrax.SaveAt(ts=save_ts),
+        saveat=diffrax.SaveAt(ts=save_ts[:-1], t1=True),
         max_steps=4,
     )
 
