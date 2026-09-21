@@ -232,6 +232,35 @@ def cap_vector_fields(
     return drift_frame, diffusion_rows
 
 
+def _make_sphere_solve(
+    name: str,
+    terms,
+    solver: diffrax.AbstractSolver,
+    ts: jax.Array,
+    y0: jax.Array,
+) -> Callable[[], SphereSolve]:
+    stepsize_controller = diffrax.StepTo(ts)
+    saveat = diffrax.SaveAt(ts=ts)
+
+    def solve() -> SphereSolve:
+        sol = diffrax.diffeqsolve(
+            terms,
+            solver,
+            t0=float(ts[0]),
+            t1=float(ts[-1]),
+            dt0=None,
+            y0=y0,
+            stepsize_controller=stepsize_controller,
+            saveat=saveat,
+            max_steps=ts.shape[0] + 4,
+            throw=True,
+        )
+        rotations = np.asarray(jax.block_until_ready(sol.ys))
+        return SphereSolve(name, np.asarray(ts), rotations, sphere_points(rotations))
+
+    return solve
+
+
 def make_geometric_euler_solve(
     fine_ts: jax.Array,
     brownian: jax.Array,
@@ -258,32 +287,9 @@ def make_geometric_euler_solve(
             diffrax.LinearInterpolation(ts=fine_ts, ys=brownian),
         ),
     )
-    solver = GeometricEuler()
-    stepsize_controller = diffrax.StepTo(fine_ts)
-    saveat = diffrax.SaveAt(ts=fine_ts)
-
-    def solve() -> SphereSolve:
-        sol = diffrax.diffeqsolve(
-            terms,
-            solver,
-            t0=float(fine_ts[0]),
-            t1=float(fine_ts[-1]),
-            dt0=None,
-            y0=y0,
-            stepsize_controller=stepsize_controller,
-            saveat=saveat,
-            max_steps=fine_ts.shape[0] + 4,
-            throw=True,
-        )
-        rotations = np.asarray(jax.block_until_ready(sol.ys))
-        return SphereSolve(
-            "Georax GeometricEuler",
-            np.asarray(fine_ts),
-            rotations,
-            sphere_points(rotations),
-        )
-
-    return solve
+    return _make_sphere_solve(
+        "Georax GeometricEuler", terms, GeometricEuler(), fine_ts, y0
+    )
 
 
 def make_srkmk_reference_solve(
@@ -312,32 +318,9 @@ def make_srkmk_reference_solve(
         GeometricTerm(drift_fn, geometry),
         diffrax.ControlTerm(diffusion_fn, control),
     )
-    solver = SRKMK(diffrax.GeneralShARK())
-    stepsize_controller = diffrax.StepTo(fine_ts)
-    saveat = diffrax.SaveAt(ts=fine_ts)
-
-    def solve() -> SphereSolve:
-        sol = diffrax.diffeqsolve(
-            terms,
-            solver,
-            t0=float(fine_ts[0]),
-            t1=float(fine_ts[-1]),
-            dt0=None,
-            y0=y0,
-            stepsize_controller=stepsize_controller,
-            saveat=saveat,
-            max_steps=fine_ts.shape[0] + 4,
-            throw=True,
-        )
-        rotations = np.asarray(jax.block_until_ready(sol.ys))
-        return SphereSolve(
-            "SRKMK(GeneralShARK)",
-            np.asarray(fine_ts),
-            rotations,
-            sphere_points(rotations),
-        )
-
-    return solve
+    return _make_sphere_solve(
+        "SRKMK(GeneralShARK)", terms, SRKMK(diffrax.GeneralShARK()), fine_ts, y0
+    )
 
 
 def make_log_ode_solve(
@@ -363,32 +346,13 @@ def make_log_ode_solve(
         return jnp.concatenate([drift[None, :], diffusion_rows], axis=0)
 
     term = RoughTerm(vector_field, control, SO(3))
-    solver = LogODE(RKMK(diffrax.Heun()))
-    stepsize_controller = diffrax.StepTo(coarse_ts)
-    saveat = diffrax.SaveAt(ts=coarse_ts)
-
-    def solve() -> SphereSolve:
-        sol = diffrax.diffeqsolve(
-            term,
-            solver,
-            t0=float(coarse_ts[0]),
-            t1=float(coarse_ts[-1]),
-            dt0=None,
-            y0=y0,
-            stepsize_controller=stepsize_controller,
-            saveat=saveat,
-            max_steps=coarse_ts.shape[0] + 4,
-            throw=True,
-        )
-        rotations = np.asarray(jax.block_until_ready(sol.ys))
-        return SphereSolve(
-            "Roughrax LogODE + RKMK(Heun)",
-            np.asarray(coarse_ts),
-            rotations,
-            sphere_points(rotations),
-        )
-
-    return solve
+    return _make_sphere_solve(
+        "Roughrax LogODE + RKMK(Heun)",
+        term,
+        LogODE(RKMK(diffrax.Heun())),
+        coarse_ts,
+        y0,
+    )
 
 
 def time_solve(solve_fn) -> tuple[SphereSolve, float]:
