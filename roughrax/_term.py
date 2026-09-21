@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import copy
 from numbers import Integral
 from typing import Any, Literal
 
@@ -174,9 +175,8 @@ class SignatureInterpolation(AbstractPath):
             "signature_knots must be finite, strictly increasing, and equal "
             "control.ts[::stride].",
         )
-        windows = jnp.stack(
-            [ys[j * stride : (j + 1) * stride + 1] for j in range(num_intervals)]
-        )
+        indices = stride * jnp.arange(num_intervals)[:, None] + jnp.arange(stride + 1)
+        windows = ys[indices]
 
         match self.solution:
             case "ito":
@@ -200,13 +200,8 @@ class SignatureInterpolation(AbstractPath):
             case _:
                 raise ValueError(f"Unknown solution type {self.solution!r}.")
 
-        out = SignatureInterpolation(
-            self.control,
-            signature_knots,
-            self.depth,
-            self.solution,
-            correction=self.correction,
-        )
+        out = copy(self)
+        object.__setattr__(out, "ts", signature_knots)
         object.__setattr__(out, "coeffs", coeffs)
         object.__setattr__(out, "basis", basis)
         return out
@@ -222,9 +217,7 @@ class SignatureInterpolation(AbstractPath):
         index = jnp.searchsorted(self.ts, lower, side="right") - 1
         index = jnp.clip(index, 0, self.coeffs.shape[0] - 1)
         denominator = self.ts[index + 1] - self.ts[index]
-        fraction0 = (t0 - self.ts[index]) / denominator
-        fraction1 = (t1 - self.ts[index]) / denominator
-        increment = (fraction1 - fraction0) * self.coeffs[index]
+        increment = ((t1 - t0) / denominator) * self.coeffs[index]
         return eqx.error_if(
             increment,
             upper > self.ts[index + 1],
@@ -302,16 +295,16 @@ class RoughTerm(AbstractTerm[Array, Array]):
             fields = jnp.asarray(self.vector_field(y))
             logsig_size = len(self.basis.keys)
             columns_shape = (*jnp.shape(y), logsig_size)
-            if fields.shape == columns_shape:
-                return jnp.moveaxis(fields, -1, 0)
-            if fields.ndim == 1 and fields.size == jnp.size(y) * logsig_size:
-                columns = jnp.reshape(fields, columns_shape)
-                return jnp.moveaxis(columns, -1, 0)
-            raise ValueError(
-                "A lifted vector field must return shape "
-                f"{columns_shape} or a flat array of the same size, got "
-                f"{fields.shape}."
-            )
+            if fields.shape != columns_shape and not (
+                fields.ndim == 1 and fields.size == jnp.size(y) * logsig_size
+            ):
+                raise ValueError(
+                    "A lifted vector field must return shape "
+                    f"{columns_shape} or a flat array of the same size, got "
+                    f"{fields.shape}."
+                )
+            columns = jnp.reshape(fields, columns_shape)
+            return jnp.moveaxis(columns, -1, 0)
         return jnp.stack([field(y) for field in self.lifted_fields])
 
     def contr(self, t0, t1, **kwargs):
