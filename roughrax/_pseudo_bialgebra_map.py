@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-from collections import Counter
 from collections.abc import Callable, Iterable
-from math import factorial, prod
 from typing import Any
 
 import jax
@@ -71,15 +69,6 @@ def _left_nested_frame_bracket(
     for right in fields[1:]:
         acc = geometry.frame_bracket(x, acc, right(x))
     return acc
-
-
-def _tree_symmetry(tree: Any) -> int:
-    if len(tree) == 1:
-        return 1
-    children = tree[:-1]
-    return prod(_tree_symmetry(child) for child in children) * prod(
-        factorial(count) for count in Counter(children).values()
-    )
 
 
 def _scale_field(field: LiftedField, scale: float) -> LiftedField:
@@ -154,9 +143,12 @@ def _realise_bck(
     basis: PrimitiveBasis,
     raw_fields: _RawFields,
 ) -> tuple[LiftedField, ...]:
+    assert basis.symmetry is not None
     return tuple(
-        _scale_field(raw_fields[index], 1.0 / _tree_symmetry(tree))
-        for index, tree in enumerate(basis.keys)
+        raw_fields[index]
+        if symmetry == 1
+        else _scale_field(raw_fields[index], 1.0 / symmetry)
+        for index, symmetry in enumerate(basis.symmetry)
     )
 
 

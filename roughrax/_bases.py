@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
+from math import factorial, prod
 from typing import Hashable, Literal
 
 import pysiglib
@@ -25,6 +27,8 @@ class PrimitiveBasis:
     # children; consumers left-nest-bracket them. Otherwise they are the node
     # children of the single tree/word.
     children: tuple[tuple[int, ...], ...]
+    # BCK tree symmetry factors, aligned with keys; unused by other bases.
+    symmetry: tuple[int, ...] | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -136,6 +140,16 @@ def _make_tree_basis(
     tree_id = {t: i for i, t in enumerate(trees)}
     children = tuple(tuple(tree_id[child] for child in tree[:-1]) for tree in trees)
 
+    # pySigLib enumerates trees by degree, so children precede their parents.
+    symmetry: list[int] = []
+    for child_ids in children:
+        symmetry.append(
+            prod(
+                symmetry[child] ** count * factorial(count)
+                for child, count in Counter(child_ids).items()
+            )
+        )
+
     return PrimitiveBasis(
         kind=kind,
         depth=depth,
@@ -144,6 +158,7 @@ def _make_tree_basis(
         keys=trees,
         root_colour=tuple(tree[-1] for tree in trees),
         children=children,
+        symmetry=tuple(symmetry),
     )
 
 
