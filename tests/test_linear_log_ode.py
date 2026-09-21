@@ -90,28 +90,19 @@ def _commutator(left, right):
     return left @ right - right @ left
 
 
-def _lyndon_matrix_basis(level_one, basis, side):
-    matrices = [None] * len(basis.keys)
-
-    def build(index):
-        if matrices[index] is not None:
-            return matrices[index]
-
-        child_ids = basis.children[index]
-        if not child_ids:
-            matrix = level_one[basis.root_colour[index]]
-        else:
-            left = build(child_ids[0])
-            right = build(child_ids[1])
-            matrix = (
-                _commutator(left, right)
-                if side == "right"
-                else _commutator(right, left)
-            )
-        matrices[index] = matrix
-        return matrix
-
-    return jnp.stack([build(index) for index in range(len(basis.keys))])
+def _depth3_matrix_basis(side):
+    # Method-1 order: 0, 1, 01, 001, 011. Left action reverses each
+    # commutator, giving one minus sign at degree two and two at degree three.
+    bracket = _commutator(A0, A1)
+    return jnp.stack(
+        [
+            A0,
+            A1,
+            bracket if side == "right" else -bracket,
+            _commutator(A0, bracket),
+            _commutator(bracket, A1),
+        ]
+    )
 
 
 def _omega_components(coeffs, matrices, basis):
@@ -129,7 +120,7 @@ def test_linear_magnus_log_ode_matches_right_matrix_exponential():
 
     actual = _solve(term, LinearMagnus(side="right"), signature_knots, y0)
 
-    matrices = _lyndon_matrix_basis(MATRICES, term.basis, "right")
+    matrices = _depth3_matrix_basis("right")
     coeffs = term.contr(signature_knots[0], signature_knots[-1])
     omega = jnp.tensordot(coeffs, matrices, axes=1)
     expected = y0 @ jsl.expm(omega)
@@ -144,7 +135,7 @@ def test_linear_magnus_log_ode_matches_left_matrix_exponential():
 
     actual = _solve(term, LinearMagnus(side="left"), signature_knots, y0)
 
-    matrices = _lyndon_matrix_basis(MATRICES, term.basis, "left")
+    matrices = _depth3_matrix_basis("left")
     coeffs = term.contr(signature_knots[0], signature_knots[-1])
     omega = jnp.tensordot(coeffs, matrices, axes=1)
     expected = jsl.expm(omega) @ y0
@@ -159,7 +150,7 @@ def test_linear_fer_log_ode_matches_depth3_product():
 
     actual = _solve(term, LinearFer(side="right"), signature_knots, y0)
 
-    matrices = _lyndon_matrix_basis(MATRICES, term.basis, "right")
+    matrices = _depth3_matrix_basis("right")
     components = _omega_components(
         term.contr(signature_knots[0], signature_knots[-1]), matrices, term.basis
     )
@@ -306,7 +297,7 @@ def test_linear_magnus_saveat_samples_exact_fake_time():
         max_steps=4,
     )
 
-    matrices = _lyndon_matrix_basis(MATRICES, term.basis, "right")
+    matrices = _depth3_matrix_basis("right")
     coeffs = term.contr(signature_knots[0], signature_knots[-1])
     omega = jnp.tensordot(coeffs, matrices, axes=1)
     fake_u = (save_ts - signature_knots[0]) / (signature_knots[-1] - signature_knots[0])
@@ -333,7 +324,7 @@ def test_linear_fer_saveat_scales_the_full_generator():
         max_steps=4,
     )
 
-    matrices = _lyndon_matrix_basis(MATRICES, term.basis, "right")
+    matrices = _depth3_matrix_basis("right")
     components = _omega_components(
         term.contr(signature_knots[0], signature_knots[-1]), matrices, term.basis
     )

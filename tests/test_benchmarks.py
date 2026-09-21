@@ -162,27 +162,6 @@ def make_basis(case: BenchmarkCase) -> PrimitiveBasis:
     return make_planar_tree_basis(case.depth, case.dim)
 
 
-def signature_coefficients(case: BenchmarkCase):
-    indices = np.searchsorted(case.ts, case.coarse_ts)
-    if case.solution == "stratonovich":
-        pysiglib.prepare_log_sig(case.dim, case.depth, 1)
-        return tuple(
-            pysiglib.log_sig(case.ys[indices[j] : indices[j + 1] + 1], case.depth)
-            for j in range(len(indices) - 1)
-        )
-
-    planar = not isinstance(case.geometry, Euclidean)
-    pysiglib.prepare_branched_sig(case.dim, case.depth, planar=planar)
-    return tuple(
-        pysiglib.branched_log_sig(
-            case.ys[indices[j] : indices[j + 1] + 1],
-            case.depth,
-            planar=planar,
-        )
-        for j in range(len(indices) - 1)
-    )
-
-
 def prepare_signature_backend(case: BenchmarkCase):
     if case.solution == "stratonovich":
         pysiglib.prepare_log_sig(case.dim, case.depth, 1)
