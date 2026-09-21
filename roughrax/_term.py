@@ -18,6 +18,7 @@ from roughrax._bases import (
     make_planar_tree_basis,
     make_tree_basis,
 )
+from roughrax._controlled import ControlledVectorField
 from roughrax._pseudo_bialgebra_map import (
     LiftedField,
     VectorField,
@@ -243,7 +244,7 @@ class SignatureInterpolation(AbstractPath):
 class RoughTerm(AbstractTerm[Array, Array]):
     """Diffrax term over rough-path coefficients."""
 
-    vector_field: VectorField = eqx.field(static=True)
+    vector_field: VectorField | ControlledVectorField
     control: SignatureInterpolation
     basis: PrimitiveBasis = eqx.field(static=True)
     lifted_fields: tuple[LiftedField, ...] = eqx.field(static=True)
@@ -252,7 +253,7 @@ class RoughTerm(AbstractTerm[Array, Array]):
 
     def __init__(
         self,
-        vector_field: VectorField,
+        vector_field: VectorField | ControlledVectorField,
         control: SignatureInterpolation,
         geometry: Manifold[Any] = Euclidean(),
         *,
@@ -263,6 +264,21 @@ class RoughTerm(AbstractTerm[Array, Array]):
         control = control.materialise(geometry)
         assert control.basis is not None
 
+        if isinstance(vector_field, ControlledVectorField):
+            if _has_lifted_vector_field:
+                raise ValueError(
+                    "ControlledVectorField supplies level-one coefficients, not lifted columns."
+                )
+            if control.basis.kind != "lyndon":
+                raise ValueError(
+                    "ControlledVectorField currently requires a geometric (stratonovich) control."
+                )
+            if len(vector_field.coefficients) < control.depth:
+                raise ValueError(
+                    f"Depth {control.depth} requires {control.depth} controlled coefficient "
+                    "entries (including the vector field); use None for known zero derivatives."
+                )
+
         self.vector_field = vector_field
         self.control = control
         self.basis = control.basis
@@ -271,6 +287,7 @@ class RoughTerm(AbstractTerm[Array, Array]):
         self.lifted_fields = (
             ()
             if _has_lifted_vector_field
+            or isinstance(vector_field, ControlledVectorField)
             else form_pseudo_bialgebra_map(vector_field, control.basis, geometry)
         )
 
@@ -290,7 +307,17 @@ class RoughTerm(AbstractTerm[Array, Array]):
         )
 
     def vf(self, t, y, args):
-        del t, args
+        if isinstance(self.vector_field, ControlledVectorField):
+            term, state, _ = self.prepare_step(t, y, args)
+            auxiliary_size = state.size - y.size
+            frame_shape = (
+                y.shape
+                if isinstance(self.geometry, Euclidean)
+                else self.geometry.coordinate_shape
+            )
+            return term.vf(t, state, args)[:, auxiliary_size:].reshape(
+                (len(self.basis.keys), *frame_shape)
+            )
         if self.has_lifted_vector_field:
             fields = jnp.asarray(self.vector_field(y))
             logsig_size = len(self.basis.keys)
@@ -306,6 +333,20 @@ class RoughTerm(AbstractTerm[Array, Array]):
             columns = jnp.reshape(fields, columns_shape)
             return jnp.moveaxis(columns, -1, 0)
         return jnp.stack([field(y) for field in self.lifted_fields])
+
+    def prepare_step(self, t, y, args):
+        """Return an autonomous term, inner state, and projection for one step."""
+        if not isinstance(self.vector_field, ControlledVectorField):
+            return self, y, lambda state: state
+        field, state, geometry, project = self.vector_field._augment(
+            t,
+            y,
+            args,
+            dim=self.basis.dim,
+            depth=self.basis.depth,
+            geometry=self.geometry,
+        )
+        return RoughTerm(field, self.control, geometry), state, project
 
     def contr(self, t0, t1, **kwargs):
         return self.control.evaluate(t0, t1, **kwargs)

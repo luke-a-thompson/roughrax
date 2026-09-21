@@ -6,6 +6,7 @@ from diffrax import (
     LocalLinearInterpolation,
     ODETerm,
 )
+from diffrax._term import WrapTerm
 from georax import Euclidean, GeometricTerm
 
 from roughrax._term import RoughTerm, unwrap_rough_term
@@ -50,25 +51,36 @@ class LogODE(AbstractSolver[None]):
         rough_term = unwrap_rough_term(terms)
         coeffs = terms.contr(t0, t1)
 
+        # Diffrax expresses backward solves in an increasing internal time.
+        time = t0
+        wrapped = terms
+        while isinstance(wrapped, WrapTerm):
+            time = time * wrapped.direction
+            wrapped = wrapped.term
+        inner_rough_term, inner_y0, project = rough_term.prepare_step(time, y0, args)
+
         def frozen_vector_field(s, y, args):
             del s
-            return terms.vf_prod(t0, y, args, coeffs)
+            return inner_rough_term.vf_prod(time, y, args, coeffs)
 
         inner_term = (
             ODETerm(frozen_vector_field)
-            if isinstance(rough_term.geometry, Euclidean)
-            else GeometricTerm(frozen_vector_field, rough_term.geometry)
+            if isinstance(inner_rough_term.geometry, Euclidean)
+            else GeometricTerm(frozen_vector_field, inner_rough_term.geometry)
         )
-        inner_state = self.solver.init(inner_term, 0.0, 1.0, y0, args)
+        inner_state = self.solver.init(inner_term, 0.0, 1.0, inner_y0, args)
         y1, y_error, _, _, result = self.solver.step(
             inner_term,
             0.0,
             1.0,
-            y0,
+            inner_y0,
             args,
             inner_state,
             made_jump,
         )
+        y1 = project(y1)
+        if y_error is not None:
+            y_error = project(y_error)
         return y1, y_error, dict(y0=y0, y1=y1), None, result
 
     def func(self, terms, t0, y0, args):
