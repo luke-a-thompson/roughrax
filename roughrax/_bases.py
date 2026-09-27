@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
-from itertools import product
 from math import factorial, prod
 from typing import Hashable, Literal
 
@@ -38,9 +37,7 @@ class CoefficientBasis:
 
 
 def make_word_basis(depth: int, dim: int) -> CoefficientBasis:
-    words = tuple(
-        word for k in range(1, depth + 1) for word in product(range(dim), repeat=k)
-    )
+    words = tuple(word for word in pysiglib.words(dim, depth) if word)
     return CoefficientBasis(
         kind="word",
         depth=depth,
@@ -102,6 +99,11 @@ def _make_tree_basis(
     *,
     planar: bool,
 ) -> CoefficientBasis:
+    keys = tuple(
+        key for key in pysiglib.trees(dim, depth, planar=planar) if key is not None
+    )
+    key_id = {key: i for i, key in enumerate(keys)}
+
     def tree_degree(tree) -> int:
         return 1 + sum(tree_degree(child) for child in tree[:-1])
 
@@ -109,26 +111,19 @@ def _make_tree_basis(
         # pySigLib indexes planar branched signatures by ordered forests of
         # planar trees. ``tree_to_idx`` accepts a single tree as shorthand for a
         # one-tree forest, but the full coefficient vector includes forests.
-        forests = tuple(
-            forest
-            for forest in pysiglib.trees(dim, depth, planar=True)
-            if forest is not None
-        )
         expected = pysiglib.branched_sig_length(
             dim,
             depth,
             planar=True,
             scalar_term=False,
         )
-        if len(forests) != expected:
+        if len(keys) != expected:
             raise RuntimeError(
                 "pysiglib planar tree enumeration does not match branched "
                 "signature coefficient length"
             )
-        forest_id = {forest: i for i, forest in enumerate(forests)}
-
         def single_tree_id(tree) -> int:
-            return forest_id[(tree,)]
+            return key_id[(tree,)]
 
         def forest_degree(forest) -> int:
             return sum(tree_degree(tree) for tree in forest)
@@ -146,15 +141,13 @@ def _make_tree_basis(
             kind=kind,
             depth=depth,
             dim=dim,
-            degree=tuple(forest_degree(forest) for forest in forests),
-            keys=forests,
-            root_colour=tuple(forest_root_colour(forest) for forest in forests),
-            children=tuple(forest_children(forest) for forest in forests),
+            degree=tuple(forest_degree(forest) for forest in keys),
+            keys=keys,
+            root_colour=tuple(forest_root_colour(forest) for forest in keys),
+            children=tuple(forest_children(forest) for forest in keys),
         )
 
-    trees = tuple(t for t in pysiglib.trees(dim, depth, planar=False) if t is not None)
-    tree_id = {t: i for i, t in enumerate(trees)}
-    children = tuple(tuple(tree_id[child] for child in tree[:-1]) for tree in trees)
+    children = tuple(tuple(key_id[child] for child in tree[:-1]) for tree in keys)
 
     # pySigLib enumerates trees by degree, so children precede their parents.
     symmetry: list[int] = []
@@ -170,9 +163,9 @@ def _make_tree_basis(
         kind=kind,
         depth=depth,
         dim=dim,
-        degree=tuple(tree_degree(tree) for tree in trees),
-        keys=trees,
-        root_colour=tuple(tree[-1] for tree in trees),
+        degree=tuple(tree_degree(tree) for tree in keys),
+        keys=keys,
+        root_colour=tuple(tree[-1] for tree in keys),
         children=children,
         symmetry=tuple(symmetry),
     )
