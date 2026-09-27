@@ -15,7 +15,7 @@ from roughrax._solver._fer_coefficients import (
     LieWord,
 )
 from roughrax._solver.linear import _fer_factors
-from roughrax._term import SignatureInterpolation
+from roughrax._term import LogSignatureInterpolation
 
 
 def _word_weight(word: LieWord) -> int:
@@ -33,7 +33,7 @@ def test_generated_fer_recipes_are_homogeneous_and_normalised():
 
 def _fer_product(components):
     product = jnp.eye(components.shape[-1], dtype=components.dtype)
-    for factor in _fer_factors(list(components)):
+    for factor in _fer_factors(components):
         product = product @ jsl.expm(factor)
     return product
 
@@ -82,7 +82,7 @@ def _solve_precomputed(depth):
     basis = make_lyndon_basis(depth, dim=2)
     ts = jnp.asarray([0.0, 1.0])
     coeffs = jnp.linspace(-0.03, 0.04, len(basis.keys))[None, :]
-    control = SignatureInterpolation.from_logsignatures(
+    control = LogSignatureInterpolation.from_logsignatures(
         ts,
         coeffs,
         input_dim=2,

@@ -9,7 +9,7 @@ from diffrax import (
 from diffrax._term import WrapTerm
 from georax import Euclidean, GeometricTerm
 
-from roughrax._term import RoughTerm, unwrap_rough_term
+from roughrax._term import LogSignatureInterpolation, RoughTerm, unwrap_rough_term
 
 
 class LogODE(AbstractSolver[None]):
@@ -42,13 +42,17 @@ class LogODE(AbstractSolver[None]):
         object.__setattr__(self, "solver", solver)
 
     def init(self, terms, t0, t1, y0, args) -> None:
-        del terms, t0, t1, y0, args
+        del t0, t1, y0, args
+        if not isinstance(unwrap_rough_term(terms).control, LogSignatureInterpolation):
+            raise TypeError("LogODE requires LogSignatureInterpolation.")
         return None
 
     def step(self, terms, t0, t1, y0, args, solver_state, made_jump):
         del solver_state
 
         rough_term = unwrap_rough_term(terms)
+        if not isinstance(rough_term.control, LogSignatureInterpolation):
+            raise TypeError("LogODE requires LogSignatureInterpolation.")
         coeffs = terms.contr(t0, t1)
 
         # Diffrax expresses backward solves in an increasing internal time.

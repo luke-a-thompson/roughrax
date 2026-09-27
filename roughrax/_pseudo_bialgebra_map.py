@@ -7,8 +7,7 @@ import jax
 from georax import Manifold, post_lie_bracket
 from jaxtyping import Array
 
-from roughrax._bases import PrimitiveBasis
-
+from roughrax._bases import CoefficientBasis
 
 VectorField = Callable[[Array], Array]
 LiftedField = Callable[[Array], Array]
@@ -80,7 +79,7 @@ def _scale_field(field: LiftedField, scale: float) -> LiftedField:
 
 def _build_raw_fields(
     vector_field: VectorField,
-    basis: PrimitiveBasis,
+    basis: CoefficientBasis,
     geometry: Manifold[Any],
     indices: Iterable[int],
 ) -> _RawFields:
@@ -140,7 +139,7 @@ def _build_raw_fields(
 
 
 def _realise_bck(
-    basis: PrimitiveBasis,
+    basis: CoefficientBasis,
     raw_fields: _RawFields,
 ) -> tuple[LiftedField, ...]:
     assert basis.symmetry is not None
@@ -153,7 +152,7 @@ def _realise_bck(
 
 
 def _realise_mkw(
-    basis: PrimitiveBasis,
+    basis: CoefficientBasis,
     raw_fields: _RawFields,
     geometry: Manifold[Any],
 ) -> tuple[LiftedField, ...]:
@@ -182,7 +181,7 @@ def _realise_mkw(
 
 def form_pseudo_bialgebra_map(
     vector_field: VectorField,
-    basis: PrimitiveBasis,
+    basis: CoefficientBasis,
     geometry: Manifold[Any],
 ) -> tuple[LiftedField, ...]:
     """Form basis vector fields for the pseudo-bialgebra map.

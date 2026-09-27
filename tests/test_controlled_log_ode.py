@@ -6,9 +6,9 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from georax import Euclidean, RKMK, SO
+from georax import RKMK, SO, Euclidean
 
-from roughrax import ControlledVectorField, LogODE, RoughTerm, SignatureInterpolation
+from roughrax import ControlledVectorField, LogODE, LogSignatureInterpolation, RoughTerm
 
 
 def solve(term, ts, y0, *, solver=None, args=None):
@@ -32,7 +32,7 @@ def test_scalar_controlled_integral_and_missing_correction():
     xs = jnp.array([0.7, 1.2, 0.2, 0.9, -0.4, 0.3, 0.1, 0.8, 0.4])
     driver = diffrax.LinearInterpolation(ts=ts, ys=xs[:, None])
     knots = ts[::stride]
-    control = SignatureInterpolation.from_logsignatures(
+    control = LogSignatureInterpolation.from_logsignatures(
         knots, jnp.diff(xs[::stride])[:, None], input_dim=1, depth=2
     )
 
@@ -66,7 +66,7 @@ def test_higher_controlled_derivatives_with_jit_vmap_and_grad():
         driver,
         depth=depth,
     )
-    control = SignatureInterpolation.from_logsignatures(
+    control = LogSignatureInterpolation.from_logsignatures(
         ts, jnp.diff(xs, axis=0), input_dim=1, depth=depth
     )
     term = RoughTerm(coefficient, control)
@@ -107,7 +107,7 @@ def test_depth_three_keeps_nonsymmetric_area_dependence():
         return jnp.zeros((2, 2, 2)).at[0, 1, 0].set(1.0)
 
     knots = ts[jnp.array([0, 4])]
-    control = SignatureInterpolation(driver, knots, depth=3, solution="stratonovich")
+    control = LogSignatureInterpolation(driver, knots, depth=3, solution="stratonovich")
     term = RoughTerm(ControlledVectorField(vf, first, second), control)
     actual = solve(term, knots, jnp.array(0.0))[-1]
     np.testing.assert_allclose(actual, -(a**2) * b, atol=2e-7)
@@ -120,7 +120,7 @@ def test_from_driver_keeps_cross_channel_area():
     xs = jnp.array([[0, 0], [a, 0], [a, b], [0, b], [0, 0]])
     driver = diffrax.LinearInterpolation(ts=ts, ys=xs)
     knots = ts[jnp.array([0, 4])]
-    control = SignatureInterpolation(
+    control = LogSignatureInterpolation(
         driver, knots, depth=depth, solution="stratonovich"
     )
     coefficient = ControlledVectorField.from_driver(
@@ -140,7 +140,7 @@ def test_gradient_through_driver_values_and_signatures():
         coefficient = ControlledVectorField.from_driver(
             lambda x, y, args: x, driver, depth=2
         )
-        control = SignatureInterpolation.from_logsignatures(
+        control = LogSignatureInterpolation.from_logsignatures(
             ts, jnp.diff(xs)[:, None], input_dim=1, depth=2
         )
         return solve(RoughTerm(coefficient, control), ts, jnp.array(0.0))[-1]
@@ -155,7 +155,7 @@ def test_spatial_and_controlled_derivatives_both_contribute():
     ts = jnp.array([0.0, 1.0])
     xs = jnp.array([[0.3], [0.4]])
     driver = diffrax.LinearInterpolation(ts=ts, ys=xs)
-    control = SignatureInterpolation.from_logsignatures(
+    control = LogSignatureInterpolation.from_logsignatures(
         ts, jnp.diff(xs, axis=0), input_dim=1, depth=3
     )
     coefficient = ControlledVectorField.from_driver(
@@ -173,7 +173,7 @@ def test_controlled_manifold_uses_product_geometry():
     ts = jnp.array([0.0, 1.0])
     xs = jnp.array([[0.0], [0.3]])
     driver = diffrax.LinearInterpolation(ts=ts, ys=xs)
-    control = SignatureInterpolation.from_logsignatures(
+    control = LogSignatureInterpolation.from_logsignatures(
         ts, jnp.diff(xs, axis=0), input_dim=1, depth=2
     )
     axis = jnp.array([1.0, 0.0, 0.0])
@@ -187,8 +187,8 @@ def test_controlled_manifold_uses_product_geometry():
         jnp.eye(3),
         solver=RKMK(diffrax.Heun()),
     )[-1]
-    geometry.select_chart(2)
-    expected = geometry.apply_increment(jnp.eye(3), 0.5 * xs[-1, 0] ** 2 * axis)
+    chart = geometry.select_chart(2)
+    expected = geometry.apply_increment(jnp.eye(3), 0.5 * xs[-1, 0] ** 2 * axis, chart)
     np.testing.assert_allclose(actual, expected, atol=2e-7)
     np.testing.assert_allclose(actual.T @ actual, jnp.eye(3), atol=2e-7)
 
@@ -200,7 +200,7 @@ def test_backward_solve_refreshes_coefficients_at_physical_time():
     coefficient = ControlledVectorField.from_driver(
         lambda x, y, args: x, driver, depth=2
     )
-    control = SignatureInterpolation.from_logsignatures(
+    control = LogSignatureInterpolation.from_logsignatures(
         ts, jnp.diff(xs, axis=0), input_dim=1, depth=2
     )
     actual = solve(RoughTerm(coefficient, control), ts[::-1], jnp.array(0.0))
@@ -211,7 +211,7 @@ def test_backward_solve_refreshes_coefficients_at_physical_time():
 
 def test_controlled_hierarchy_validation():
     ts = jnp.array([0.0, 1.0])
-    control = SignatureInterpolation.from_logsignatures(
+    control = LogSignatureInterpolation.from_logsignatures(
         ts, jnp.ones((1, 1)), input_dim=1, depth=3
     )
     with pytest.raises(ValueError, match="Depth 3 requires 3"):
@@ -224,7 +224,7 @@ def test_controlled_hierarchy_validation():
             control,
         )
         term.vf(0.0, jnp.array(0.0), None)
-    branched = SignatureInterpolation(
+    branched = LogSignatureInterpolation(
         diffrax.LinearInterpolation(ts=ts, ys=ts[:, None]), ts, depth=2, solution="ito"
     )
     with pytest.raises(ValueError, match="geometric"):

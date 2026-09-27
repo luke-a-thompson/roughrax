@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
+from itertools import product
 from math import factorial, prod
 from typing import Hashable, Literal
 
@@ -9,14 +10,14 @@ import pysiglib
 
 
 @dataclass(frozen=True, slots=True, eq=False)
-class PrimitiveBasis:
+class CoefficientBasis:
     """A coefficient basis aligned with the signature backend output.
 
-    The planar MKW backend returns expanded ordered-forest coordinates, even for
-    log signatures, so this internal basis is not tree-only in that case.
+    Full planar MKW signatures and method-0 log signatures share the expanded
+    ordered-forest basis. Their realisations as operators and vector fields differ.
     """
 
-    kind: Literal["lyndon", "tree", "planar_tree"]
+    kind: Literal["word", "lyndon", "tree", "planar_tree"]
     depth: int
     dim: int
     degree: tuple[int, ...]  # number of nodes / word length, per basis element
@@ -24,8 +25,8 @@ class PrimitiveBasis:
     root_colour: tuple[int | None, ...]  # colour of root, if there is one
     # Recursive child ids per basis element. For a planar multi-tree forest
     # (root_colour is None) these are the forest's constituent trees, not node
-    # children; consumers left-nest-bracket them. Otherwise they are the node
-    # children of the single tree/word.
+    # children. Log realisation brackets these trees; signature realisation
+    # composes their frozen frame actions. Otherwise these are node children.
     children: tuple[tuple[int, ...], ...]
     # BCK tree symmetry factors, aligned with keys; unused by other bases.
     symmetry: tuple[int, ...] | None = None
@@ -36,7 +37,22 @@ class PrimitiveBasis:
 # --------------------------------------------------------------------------- #
 
 
-def make_lyndon_basis(depth: int, dim: int) -> PrimitiveBasis:
+def make_word_basis(depth: int, dim: int) -> CoefficientBasis:
+    words = tuple(
+        word for k in range(1, depth + 1) for word in product(range(dim), repeat=k)
+    )
+    return CoefficientBasis(
+        kind="word",
+        depth=depth,
+        dim=dim,
+        degree=tuple(map(len, words)),
+        keys=words,
+        root_colour=tuple(word[0] if len(word) == 1 else None for word in words),
+        children=tuple(() for _ in words),
+    )
+
+
+def make_lyndon_basis(depth: int, dim: int) -> CoefficientBasis:
     words = tuple(pysiglib.lyndon_words(dim, depth))
     word_id = {w: i for i, w in enumerate(words)}
 
@@ -55,7 +71,7 @@ def make_lyndon_basis(depth: int, dim: int) -> PrimitiveBasis:
 
     children = tuple(standard_factorization(w) for w in words)
 
-    return PrimitiveBasis(
+    return CoefficientBasis(
         kind="lyndon",
         depth=depth,
         dim=dim,
@@ -71,11 +87,11 @@ def make_lyndon_basis(depth: int, dim: int) -> PrimitiveBasis:
 # --------------------------------------------------------------------------- #
 
 
-def make_tree_basis(depth: int, dim: int) -> PrimitiveBasis:
+def make_tree_basis(depth: int, dim: int) -> CoefficientBasis:
     return _make_tree_basis("tree", depth, dim, planar=False)
 
 
-def make_planar_tree_basis(depth: int, dim: int) -> PrimitiveBasis:
+def make_planar_tree_basis(depth: int, dim: int) -> CoefficientBasis:
     return _make_tree_basis("planar_tree", depth, dim, planar=True)
 
 
@@ -85,7 +101,7 @@ def _make_tree_basis(
     dim: int,
     *,
     planar: bool,
-) -> PrimitiveBasis:
+) -> CoefficientBasis:
     def tree_degree(tree) -> int:
         return 1 + sum(tree_degree(child) for child in tree[:-1])
 
@@ -126,7 +142,7 @@ def _make_tree_basis(
         def forest_root_colour(forest) -> int | None:
             return forest[0][-1] if len(forest) == 1 else None
 
-        return PrimitiveBasis(
+        return CoefficientBasis(
             kind=kind,
             depth=depth,
             dim=dim,
@@ -150,7 +166,7 @@ def _make_tree_basis(
             )
         )
 
-    return PrimitiveBasis(
+    return CoefficientBasis(
         kind=kind,
         depth=depth,
         dim=dim,
@@ -163,8 +179,9 @@ def _make_tree_basis(
 
 
 __all__ = [
-    "PrimitiveBasis",
+    "CoefficientBasis",
     "make_lyndon_basis",
-    "make_tree_basis",
     "make_planar_tree_basis",
+    "make_tree_basis",
+    "make_word_basis",
 ]

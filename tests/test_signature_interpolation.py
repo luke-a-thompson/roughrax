@@ -7,7 +7,7 @@ import pysiglib.jax_api as pysiglib
 import pytest
 from georax import Euclidean
 
-from roughrax import RoughTerm, SignatureInterpolation
+from roughrax import LogSignatureInterpolation, RoughTerm
 
 
 def test_rough_term_accepts_direct_logsig_columns():
@@ -15,7 +15,7 @@ def test_rough_term_accepts_direct_logsig_columns():
     ys = jnp.stack([ts, ts * 0.5], axis=-1)
     signature_knots = ts[::2]
     driver = diffrax.LinearInterpolation(ts=ts, ys=ys)
-    control = SignatureInterpolation(
+    control = LogSignatureInterpolation(
         driver,
         signature_knots,
         depth=2,
@@ -46,7 +46,7 @@ def test_signature_interpolation_evaluates_linearly():
     ys = jnp.stack([ts, ts * 0.5], axis=-1)
     signature_knots = ts[::2]
     driver = diffrax.LinearInterpolation(ts=ts, ys=ys)
-    control = SignatureInterpolation(
+    control = LogSignatureInterpolation(
         driver,
         signature_knots,
         depth=2,
@@ -67,7 +67,7 @@ def test_signature_interpolation_evaluates_linearly():
 def test_signature_knots_must_match_regular_control_stride():
     ts = jnp.linspace(0.0, 1.0, 5)
     driver = diffrax.LinearInterpolation(ts=ts, ys=(ts**2)[:, None])
-    control = SignatureInterpolation(
+    control = LogSignatureInterpolation(
         driver,
         jnp.asarray([0.0, 0.75, 1.0]),
         depth=1,
@@ -80,7 +80,7 @@ def test_signature_knots_must_match_regular_control_stride():
 
 def test_signature_intervals_may_not_cross_knots():
     ts = jnp.asarray([0.0, 1.0, 2.0])
-    control = SignatureInterpolation.from_logsignatures(
+    control = LogSignatureInterpolation.from_logsignatures(
         ts,
         jnp.asarray([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]),
         input_dim=2,
@@ -99,7 +99,7 @@ def test_ito_correction_is_forwarded_to_pysiglib():
     correction = jnp.asarray([0.25], dtype=ys.dtype)
     windows = jnp.stack([ys[:3], ys[2:]])
 
-    control = SignatureInterpolation(
+    control = LogSignatureInterpolation(
         diffrax.LinearInterpolation(ts=ts, ys=ys),
         signature_knots,
         depth=2,
@@ -123,7 +123,7 @@ def test_signature_interpolation_rejects_stratonovich_correction():
     driver = diffrax.LinearInterpolation(ts=ts, ys=ts[:, None])
 
     with pytest.raises(ValueError, match="requires solution='ito'"):
-        SignatureInterpolation(
+        LogSignatureInterpolation(
             driver,
             ts,
             depth=2,
@@ -144,7 +144,7 @@ def test_signature_interpolation_rejects_stratonovich_correction():
 )
 def test_from_logsignatures_validates_array_dimensions(ts, coeffs, message):
     with pytest.raises(ValueError, match=message):
-        SignatureInterpolation.from_logsignatures(
+        LogSignatureInterpolation.from_logsignatures(
             ts,
             coeffs,
             input_dim=2,
@@ -157,7 +157,7 @@ def test_from_logsignatures_requires_positive_integer_dimensions(name, value):
     kwargs = dict(input_dim=2, depth=2)
     kwargs[name] = value
     with pytest.raises(ValueError, match=name):
-        SignatureInterpolation.from_logsignatures(
+        LogSignatureInterpolation.from_logsignatures(
             jnp.asarray([0.0, 1.0]),
             jnp.ones((1, 3)),
             **kwargs,
@@ -170,9 +170,46 @@ def test_from_logsignatures_requires_positive_integer_dimensions(name, value):
 )
 def test_from_logsignatures_requires_strictly_increasing_ts(ts):
     with pytest.raises(eqx.EquinoxRuntimeError, match="strictly increasing"):
-        SignatureInterpolation.from_logsignatures(
+        LogSignatureInterpolation.from_logsignatures(
             ts,
             jnp.ones((2, 3)),
             input_dim=2,
             depth=2,
         )
+
+
+@pytest.mark.parametrize(
+    "solution,planar", [("stratonovich", False), ("ito", False), ("ito", True)]
+)
+def test_full_signature_coefficients_and_inverse(solution, planar):
+    import numpy as np
+    from georax import SO
+
+    from roughrax import SignatureInterpolation
+
+    ts = jnp.array([0.0, 0.5, 1.0])
+    xs = jnp.array([[0.0, 0.0], [0.2, -0.1], [0.1, 0.3]])
+    knots = ts[jnp.array([0, 2])]
+    geometry = SO(3) if planar else Euclidean()
+    control = SignatureInterpolation(
+        diffrax.LinearInterpolation(ts=ts, ys=xs), knots, 3, solution
+    ).materialise(geometry)
+    if solution == "stratonovich":
+        expected = pysiglib.sig(xs, 3)
+
+        def combine(a, b):
+            return pysiglib.sig_combine(a, b, 2, 3)
+    else:
+        expected = pysiglib.branched_sig(xs, 3, planar=planar)
+
+        def combine(a, b):
+            return pysiglib.branched_sig_combine(a, b, 2, 3, planar=planar)
+
+    forward = control.evaluate(0.0, 1.0)
+    reverse = control.evaluate(1.0, 0.0)
+    np.testing.assert_allclose(forward, expected, atol=1e-7)
+    np.testing.assert_allclose(combine(forward, reverse), 0, atol=1e-7)
+    np.testing.assert_allclose(combine(reverse, forward), 0, atol=1e-7)
+    np.testing.assert_array_equal(control.evaluate(0.0, 0.0), jnp.zeros_like(forward))
+    with pytest.raises(eqx.EquinoxRuntimeError, match="adjacent signature knots"):
+        control.evaluate(0.0, 0.5)

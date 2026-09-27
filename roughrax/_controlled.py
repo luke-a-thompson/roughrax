@@ -9,6 +9,7 @@ import jax
 import jax.numpy as jnp
 from diffrax import AbstractPath
 from georax import Euclidean, LocalChart, Manifold
+from jaxtyping import Array
 
 
 class _DriverCoefficients(eqx.Module):
@@ -51,7 +52,8 @@ class ControlledVectorField(eqx.Module):
     spatial regularity; this cannot be checked numerically.
 
     Local signature coordinates start at zero on every outer step. They evolve
-    together with y through the same autonomous lift and inner ODE solver.
+    together with y through the same autonomous lift, using either the LogODE
+    inner solver or the Davie signature Taylor update.
     """
 
     coefficients: tuple[Callable | None, ...] | _DriverCoefficients
@@ -145,60 +147,78 @@ class ControlledVectorField(eqx.Module):
         return vector_field, state, augmented_geometry, project
 
 
-class _AugmentedChart(LocalChart):
-    order: int
+class _AugmentedChart(LocalChart["_AugmentedGeometry"]):
+    base_chart: LocalChart[Any]
 
-    def apply(self, x, a, geometry):
+    def apply(self, x: Array, a: Array, geometry: _AugmentedGeometry) -> Array:
         n = geometry.auxiliary_size
         y = x[n:].reshape(geometry.base_shape)
-        value = geometry.base.apply_increment(y, a[n:])
+        value = self.base_chart.apply(
+            y, a[n:].reshape(geometry.base.coordinate_shape), geometry.base
+        )
         return jnp.concatenate([x[:n] + a[:n], value.reshape(-1)])
 
-    def inverse_differential(self, x, a, b, geometry):
+    def inverse_differential(
+        self, x: Array, a: Array, b: Array, geometry: _AugmentedGeometry
+    ) -> Array:
         n = geometry.auxiliary_size
         y = x[n:].reshape(geometry.base_shape)
-        value = geometry.base.chart.inverse_differential(y, a[n:], b[n:], geometry.base)
+        shape = geometry.base.coordinate_shape
+        value = self.base_chart.inverse_differential(
+            y, a[n:].reshape(shape), b[n:].reshape(shape), geometry.base
+        )
         return jnp.concatenate([b[:n], value.reshape(-1)])
 
 
-class _AugmentedGeometry(Manifold):
+class _AugmentedGeometry(Manifold["_AugmentedGeometry"]):
     """Flat storage for the product of signature coordinates and a manifold."""
 
     base: Manifold[Any]
     auxiliary_size: int = eqx.field(static=True)
     base_shape: tuple[int, ...] = eqx.field(static=True)
 
-    def __init__(self, base, auxiliary_size, base_shape):
+    def __init__(
+        self, base: Manifold[Any], auxiliary_size: int, base_shape: tuple[int, ...]
+    ) -> None:
         self.base = base
         self.auxiliary_size = auxiliary_size
         self.base_shape = base_shape
 
     @property
-    def state_shape(self):
+    def state_shape(self) -> tuple[int, ...]:
         return (self.auxiliary_size + prod(self.base_shape),)
 
     @property
-    def coordinate_shape(self):
+    def coordinate_shape(self) -> tuple[int, ...]:
         return (self.auxiliary_size + prod(self.base.coordinate_shape),)
 
-    def trivialise(self, x, v):
+    def trivialise(self, x: Array, v: Array) -> Array:
         n = self.auxiliary_size
         value = self.base.trivialise(
             x[n:].reshape(self.base_shape), v[n:].reshape(self.base_shape)
         )
         return jnp.concatenate([v[:n], value.reshape(-1)])
 
-    def detrivialise(self, x, a):
+    def detrivialise(self, x: Array, a: Array) -> Array:
         n = self.auxiliary_size
-        value = self.base.detrivialise(x[n:].reshape(self.base_shape), a[n:])
+        value = self.base.detrivialise(
+            x[n:].reshape(self.base_shape), a[n:].reshape(self.base.coordinate_shape)
+        )
         return jnp.concatenate([a[:n], value.reshape(-1)])
 
-    def frame_bracket(self, x, a, b):
+    def frame_bracket(self, x: Array, a: Array, b: Array) -> Array:
         n = self.auxiliary_size
-        value = self.base.frame_bracket(x[n:].reshape(self.base_shape), a[n:], b[n:])
+        value = self.base.frame_bracket(
+            x[n:].reshape(self.base_shape),
+            a[n:].reshape(self.base.coordinate_shape),
+            b[n:].reshape(self.base.coordinate_shape),
+        )
         return jnp.concatenate([jnp.zeros_like(a[:n]), value.reshape(-1)])
 
-    def select_chart(self, required_order):
+    def select_chart(self, required_order: int) -> _AugmentedChart:
         chart = self.base.select_chart(required_order)
-        object.__setattr__(self, "chart", _AugmentedChart(chart.order))
-        return self.chart
+        return _AugmentedChart(chart.order, chart)
+
+    def select_pullback_chart(self, required_order: int) -> _AugmentedChart:
+        chart = self.base.select_pullback_chart(required_order)
+        return _AugmentedChart(chart.order, chart)

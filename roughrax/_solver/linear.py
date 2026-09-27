@@ -1,16 +1,18 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 import equinox as eqx
 import jax.numpy as jnp
 import jax.scipy.linalg as jsl
-from diffrax import AbstractLocalInterpolation, AbstractSolver, RESULTS
+from diffrax import RESULTS, AbstractLocalInterpolation, AbstractSolver
+from diffrax._custom_types import BoolScalarLike, RealScalarLike
+from diffrax._term import WrapTerm
 from jaxtyping import Array
 
-from roughrax._bases import PrimitiveBasis
+from roughrax._bases import CoefficientBasis
 from roughrax._solver._fer_coefficients import FER_FACTORS, FER_MAX_DEPTH, LieWord
-from roughrax._term import RoughTerm, unwrap_rough_term
+from roughrax._term import LogSignatureInterpolation, RoughTerm, unwrap_rough_term
 
 Side = Literal["right", "left"]
 
@@ -20,6 +22,8 @@ def _matrix_commutator(a: Array, b: Array) -> Array:
 
 
 def _check_linear_rough_term(rough_term: RoughTerm) -> None:
+    if not isinstance(rough_term.control, LogSignatureInterpolation):
+        raise TypeError("Linear solvers require LogSignatureInterpolation.")
     if rough_term.control.solution != "stratonovich":
         raise ValueError("Linear solvers require solution='stratonovich'.")
     if rough_term.basis.kind != "lyndon":
@@ -28,34 +32,28 @@ def _check_linear_rough_term(rough_term: RoughTerm) -> None:
 
 def _build_lyndon_matrix_basis(
     level_one: Array,
-    basis: PrimitiveBasis,
+    basis: CoefficientBasis,
     side: Side,
 ) -> Array:
-    matrices: list[Array | None] = [None] * len(basis.keys)
-
-    def build(index: int) -> Array:
-        matrix = matrices[index]
-        if matrix is not None:
-            return matrix
-
+    matrices: dict[int, Array] = {}
+    # Children have lower degree; preserve the backend's ordering in the result.
+    for index in sorted(range(len(basis.keys)), key=basis.degree.__getitem__):
         child_ids = basis.children[index]
         root_colour = basis.root_colour[index]
         if not child_ids:
+            assert root_colour is not None
             matrix = level_one[root_colour]
         else:
             if len(child_ids) != 2:
                 raise ValueError("Lyndon basis entries must have two children.")
-            left = build(child_ids[0])
-            right = build(child_ids[1])
+            left, right = (matrices[child] for child in child_ids)
             matrix = (
                 _matrix_commutator(left, right)
                 if side == "right"
                 else _matrix_commutator(right, left)
             )
         matrices[index] = matrix
-        return matrix
-
-    return jnp.stack([build(index) for index in range(len(basis.keys))])
+    return jnp.stack([matrices[index] for index in range(len(basis.keys))])
 
 
 def _matrix_basis(rough_term: RoughTerm, y0: Array, side: Side) -> Array:
@@ -80,10 +78,6 @@ def _matrix_basis(rough_term: RoughTerm, y0: Array, side: Side) -> Array:
     return _build_lyndon_matrix_basis(matrices, rough_term.basis, side)
 
 
-def _contract(coeffs: Array, matrices: Array) -> Array:
-    return jnp.tensordot(coeffs, matrices, axes=1)
-
-
 def _apply_matrix(y: Array, matrix: Array, side: Side) -> Array:
     return y @ matrix if side == "right" else matrix @ y
 
@@ -93,13 +87,15 @@ def _apply_generator(y: Array, generator: Array, side: Side) -> Array:
 
 
 class _LinearMagnusInterpolation(AbstractLocalInterpolation):
-    t0: Array
-    t1: Array
+    t0: RealScalarLike
+    t1: RealScalarLike
     y0: Array
     omega: Array
     side: Side = eqx.field(static=True)
 
-    def evaluate(self, t0, t1=None, left: bool = True):
+    def evaluate(
+        self, t0: RealScalarLike, t1: RealScalarLike | None = None, left: bool = True
+    ) -> Array:
         del left
         if t1 is not None:
             return self.evaluate(t1) - self.evaluate(t0)
@@ -109,42 +105,42 @@ class _LinearMagnusInterpolation(AbstractLocalInterpolation):
 
 
 def _apply_factor_product(y0: Array, factors: Array, side: Side) -> Array:
-    eye = jnp.eye(factors.shape[-1], dtype=factors.dtype)
-    product = eye
+    product = jnp.eye(factors.shape[-1], dtype=factors.dtype)
     for factor in factors:
         product = product @ jsl.expm(factor)
     return _apply_matrix(y0, product, side)
 
 
 class _LinearFerInterpolation(AbstractLocalInterpolation):
-    t0: Array
-    t1: Array
+    t0: RealScalarLike
+    t1: RealScalarLike
     y0: Array
     components: Array
     side: Side = eqx.field(static=True)
 
-    def evaluate(self, t0, t1=None, left: bool = True):
+    def evaluate(
+        self, t0: RealScalarLike, t1: RealScalarLike | None = None, left: bool = True
+    ) -> Array:
         del left
         if t1 is not None:
             return self.evaluate(t1) - self.evaluate(t0)
 
         u = (t0 - self.t0) / (self.t1 - self.t0)
-        factors = _fer_factors([u * component for component in self.components])
+        factors = _fer_factors(u * self.components)
         return _apply_factor_product(self.y0, factors, self.side)
 
 
 def _degree_components(
     coeffs: Array,
     matrices: Array,
-    basis: PrimitiveBasis,
-) -> list[Array]:
-    return [
-        _contract(jnp.where(jnp.asarray(basis.degree) == degree, coeffs, 0.0), matrices)
-        for degree in range(1, basis.depth + 1)
-    ]
+    basis: CoefficientBasis,
+) -> Array:
+    degrees = jnp.arange(1, basis.depth + 1)[:, None]
+    weights = jnp.where(degrees == jnp.asarray(basis.degree), coeffs, 0.0)
+    return jnp.tensordot(weights, matrices, axes=1)
 
 
-def _fer_factors(components: list[Array]) -> Array:
+def _fer_factors(components: Array) -> Array:
     values: dict[LieWord, Array] = {
         index: component for index, component in enumerate(components)
     }
@@ -158,7 +154,7 @@ def _fer_factors(components: list[Array]) -> Array:
             values[word] = value
         return value
 
-    factors = []
+    factors: list[Array] = []
     for recipe in FER_FACTORS[: len(components)]:
         factor = jnp.zeros_like(components[0])
         for numerator, denominator, word in recipe:
@@ -173,16 +169,24 @@ class _AbstractLinearSolver(AbstractSolver[None]):
     term_structure = RoughTerm
     side: Side = eqx.field(static=True)
 
-    def __init__(self, *, side: Side = "right"):
+    def __init__(self, *, side: Side = "right") -> None:
         if side not in {"right", "left"}:
             raise ValueError("side must be one of {'right', 'left'}.")
         object.__setattr__(self, "side", side)
 
-    def init(self, terms, t0, t1, y0, args) -> None:
+    def init(
+        self,
+        terms: RoughTerm | WrapTerm,
+        t0: RealScalarLike,
+        t1: RealScalarLike,
+        y0: Array,
+        args: Any,
+    ) -> None:
         del terms, t0, t1, y0, args
-        return None
 
-    def func(self, terms, t0, y0, args):
+    def func(
+        self, terms: RoughTerm | WrapTerm, t0: RealScalarLike, y0: Array, args: Any
+    ) -> Array:
         return terms.vf(t0, y0, args)
 
 
@@ -191,19 +195,24 @@ class LinearMagnus(_AbstractLinearSolver):
 
     interpolation_cls = _LinearMagnusInterpolation
 
-    def step(self, terms, t0, t1, y0, args, solver_state, made_jump):
+    def step(
+        self,
+        terms: RoughTerm | WrapTerm,
+        t0: RealScalarLike,
+        t1: RealScalarLike,
+        y0: Array,
+        args: Any,
+        solver_state: None,
+        made_jump: BoolScalarLike,
+    ) -> tuple[Array, None, dict[str, Array | Side], None, RESULTS]:
         del args, solver_state, made_jump
         rough_term = unwrap_rough_term(terms)
         _check_linear_rough_term(rough_term)
 
         matrices = _matrix_basis(rough_term, y0, self.side)
-        omega = _contract(terms.contr(t0, t1), matrices)
+        omega = jnp.tensordot(terms.contr(t0, t1), matrices, axes=1)
         y1 = _apply_generator(y0, omega, self.side)
-        dense_info = dict(
-            y0=y0,
-            omega=omega,
-            side=self.side,
-        )
+        dense_info = {"y0": y0, "omega": omega, "side": self.side}
         return y1, None, dense_info, None, RESULTS.successful
 
 
@@ -212,7 +221,16 @@ class LinearFer(_AbstractLinearSolver):
 
     interpolation_cls = _LinearFerInterpolation
 
-    def step(self, terms, t0, t1, y0, args, solver_state, made_jump):
+    def step(
+        self,
+        terms: RoughTerm | WrapTerm,
+        t0: RealScalarLike,
+        t1: RealScalarLike,
+        y0: Array,
+        args: Any,
+        solver_state: None,
+        made_jump: BoolScalarLike,
+    ) -> tuple[Array, None, dict[str, Array | Side], None, RESULTS]:
         del args, solver_state, made_jump
         rough_term = unwrap_rough_term(terms)
         _check_linear_rough_term(rough_term)
@@ -222,13 +240,9 @@ class LinearFer(_AbstractLinearSolver):
         matrices = _matrix_basis(rough_term, y0, self.side)
         components = _degree_components(terms.contr(t0, t1), matrices, rough_term.basis)
         factors = _fer_factors(components)
-        y = _apply_factor_product(y0, factors, self.side)
-        dense_info = dict(
-            y0=y0,
-            components=jnp.stack(components),
-            side=self.side,
-        )
-        return y, None, dense_info, None, RESULTS.successful
+        y1 = _apply_factor_product(y0, factors, self.side)
+        dense_info = {"y0": y0, "components": components, "side": self.side}
+        return y1, None, dense_info, None, RESULTS.successful
 
 
 __all__ = ["LinearFer", "LinearMagnus"]

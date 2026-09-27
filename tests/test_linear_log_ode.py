@@ -10,7 +10,7 @@ from georax import Euclidean
 
 from roughrax import LinearFer, LinearMagnus, RoughTerm
 import roughrax._term as term_module
-from roughrax._term import SignatureInterpolation
+from roughrax._term import LogSignatureInterpolation
 
 A0 = jnp.asarray([[0.0, 1.0], [-1.0, 0.0]])
 A1 = jnp.asarray([[0.2, -0.3], [0.4, 0.1]])
@@ -62,7 +62,7 @@ def _driver(depth):
         ]
     )
     signature_knots = jnp.asarray([0.0, 1.0])
-    control = SignatureInterpolation(
+    control = LogSignatureInterpolation(
         diffrax.LinearInterpolation(ts=ts, ys=xs),
         signature_knots,
         depth=depth,
@@ -173,7 +173,7 @@ def test_vmapped_precomputed_logsignatures_match_materialised_controls(solver):
 
     @eqx.filter_jit
     def materialise(path):
-        return SignatureInterpolation(
+        return LogSignatureInterpolation(
             diffrax.LinearInterpolation(ts=sample_ts, ys=path),
             signature_knots,
             depth=3,
@@ -198,7 +198,7 @@ def test_vmapped_precomputed_logsignatures_match_materialised_controls(solver):
 
     @eqx.filter_jit
     def solve_precomputed(coeffs, initial):
-        control = SignatureInterpolation.from_logsignatures(
+        control = LogSignatureInterpolation.from_logsignatures(
             signature_knots,
             coeffs,
             input_dim=2,

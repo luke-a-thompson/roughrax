@@ -13,9 +13,9 @@ import pysiglib.jax_api as pysiglib
 import pytest
 from georax import CG2, SO, Euclidean, Manifold
 
-from roughrax import LogODE, RoughTerm, SignatureInterpolation
+from roughrax import LogODE, LogSignatureInterpolation, RoughTerm
 from roughrax._bases import (
-    PrimitiveBasis,
+    CoefficientBasis,
     make_lyndon_basis,
     make_planar_tree_basis,
     make_tree_basis,
@@ -154,7 +154,7 @@ CASES = [
 ]
 
 
-def make_basis(case: BenchmarkCase) -> PrimitiveBasis:
+def make_basis(case: BenchmarkCase) -> CoefficientBasis:
     if case.solution == "stratonovich":
         return make_lyndon_basis(case.depth, case.dim)
     if isinstance(case.geometry, Euclidean):
@@ -167,7 +167,7 @@ def prepare_signature_backend(case: BenchmarkCase):
         pysiglib.prepare_log_sig(case.dim, case.depth, 1)
     else:
         planar = not isinstance(case.geometry, Euclidean)
-        pysiglib.prepare_branched_sig(case.dim, case.depth, planar=planar)
+        pysiglib.prepare_branched_log_sig(case.dim, case.depth, 0, planar=planar)
 
 
 @eqx.filter_jit
@@ -183,7 +183,7 @@ def _signature_coefficients_jit(
         ts=ts,
         ys=ys,
     )
-    control = SignatureInterpolation(
+    control = LogSignatureInterpolation(
         driver,
         signature_knots,
         depth,
@@ -242,7 +242,7 @@ def _solve_log_ode(
     y0,
 ):
     driver = diffrax.LinearInterpolation(ts=ts, ys=ys)
-    control = SignatureInterpolation(
+    control = LogSignatureInterpolation(
         driver,
         signature_knots,
         depth,
