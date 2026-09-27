@@ -25,7 +25,7 @@ import matplotlib
 import numpy as np
 from georax import CFEES25, Euclidean, GeometricTerm, SO
 
-from roughrax import LogODE, RoughTerm, SignatureInterpolation
+from roughrax import LogODE, RoughTerm, LogSignatureInterpolation
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -163,7 +163,7 @@ def rough_term_template_and_coeffs(
 
     for xs in xs_batch:
         driver = diffrax.LinearInterpolation(ts=ts_jax, ys=jnp.asarray(xs))
-        control = SignatureInterpolation(
+        control = LogSignatureInterpolation(
             driver,
             coarse_ts,
             depth,

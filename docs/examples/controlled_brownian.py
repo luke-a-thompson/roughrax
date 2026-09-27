@@ -29,7 +29,7 @@ import jax.numpy as jnp
 import matplotlib
 import numpy as np
 
-from roughrax import ControlledVectorField, LogODE, RoughTerm, SignatureInterpolation
+from roughrax import ControlledVectorField, LogODE, RoughTerm, LogSignatureInterpolation
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -45,7 +45,7 @@ def integrate(ts, xs, *, controlled):
     def vf_prime(t, y, args):
         return jnp.ones((1, 1), dtype=xs.dtype)
 
-    control = SignatureInterpolation(
+    control = LogSignatureInterpolation(
         driver, signature_knots=ts, depth=2, solution="stratonovich"
     )
     coefficient = ControlledVectorField(vf, vf_prime if controlled else None)

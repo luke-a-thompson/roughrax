@@ -1,11 +1,19 @@
-"""Brownian motion on a visible spherical cap via SO(3).
+"""A smooth Stratonovich SDE on the sphere via SO(3).
 
 This evolves an SO(3)-valued SDE, then displays the rotation applied to the
-north pole as a path on S^2. The same sampled Brownian path drives both solves:
+north pole as a path on S^2. The same sampled Brownian path drives all solves:
 
 * Georax `GeometricEuler` uses all fine Brownian increments.
-* Roughrax `LogODE(RKMK(Tsit5()))` uses a coarser log-signature grid.
+* Roughrax `LogODE(RKMK(Heun()))` uses a coarser log-signature grid.
+* Roughrax `Davie()` uses full signatures on the same coarse grid.
 * Georax `SRKMK(GeneralShARK())` on the fine grid is used as a reference.
+
+Playback speed reflects warmed solve time, excluding signature construction and
+plotting. Display paths interpolate the saved rotations on SO(3).
+
+The drift attracts the point towards the camera; two projected constant fields
+drive tangent noise and a third noise field spins the frame. All fields are
+smooth on SO(3), with no clipping or hard boundary confinement.
 
 Run with:
 
@@ -37,24 +45,29 @@ import jax.numpy as jnp
 import matplotlib
 import numpy as np
 from georax import RKMK, SO, SRKMK, GeometricEuler, GeometricTerm
+from scipy.spatial.transform import Rotation, Slerp
 
-from roughrax import LogODE, RoughTerm, SignatureInterpolation
+from roughrax import (
+    Davie,
+    LogODE,
+    LogSignatureInterpolation,
+    RoughTerm,
+    SignatureInterpolation,
+)
 
 matplotlib.use("Agg")
 import matplotlib.animation as animation
 import matplotlib.pyplot as plt
 
-# jax.config.update("jax_enable_x64", True)
-
 VIEW_ELEV = 24.0
 VIEW_AZIM = -58.0
 VISIBLE_DOT_MIN = 0.08
-TARGET_CAP_RADIUS = 0.68
-SOFT_CAP_RADIUS = 0.84
+CAP_ATTRACTION = 1.0
 TARGET_VIDEO_SECONDS = 15.0
 END_PAUSE_SECONDS = 5.0
-PANEL_TITLE_Y = 0.86
-ERROR_LABEL_Y = 0.14
+BACKGROUND = "#fafbf9"
+INK = "#253746"
+MUTED = "#61736e"
 WARMUP_BEFORE_TIMING = True
 DEFAULT_SEED = 7
 DEFAULT_T1 = 5.0
@@ -64,8 +77,7 @@ DEFAULT_DEPTH = 2
 DEFAULT_DIFFUSION_SCALE = 0.48
 DEFAULT_FPS = 20
 DEFAULT_DPI = 120
-DEFAULT_FORMATS = "mp4,gif"
-# DEFAULT_FORMATS = "mp4"
+DEFAULT_FORMATS = "gif"
 
 
 @dataclass(frozen=True)
@@ -175,10 +187,6 @@ def visible_sector_y0(dtype) -> jax.Array:
     return jnp.asarray(rotation, dtype=dtype)
 
 
-def _ambient_from_cap_coords(q: jax.Array, e1: jax.Array, e2: jax.Array) -> jax.Array:
-    return q[0] * e1 + q[1] * e2
-
-
 def _tangent_to_so3_coords(y: jax.Array, tangent: jax.Array) -> jax.Array:
     body = y.T @ tangent
     return jnp.asarray([0.0, body[0], body[1]], dtype=y.dtype)
@@ -187,45 +195,19 @@ def _tangent_to_so3_coords(y: jax.Array, tangent: jax.Array) -> jax.Array:
 def cap_vector_fields(
     y: jax.Array, *, diffusion_scale: float
 ) -> tuple[jax.Array, jax.Array]:
-    _, e1, e2 = camera_frame(y.dtype)
+    """Lift kappa P_p c and sigma P_p e_i to SO(3), retaining frame-spin noise."""
+    center, e1, e2 = camera_frame(y.dtype)
     point = y[:, 2]
-    cap_coords = jnp.asarray([jnp.dot(point, e1), jnp.dot(point, e2)])
-    radius_sq = jnp.dot(cap_coords, cap_coords)
-    tangent_coords = jnp.asarray([-cap_coords[1], cap_coords[0]], dtype=y.dtype)
-    seed_coords = jnp.exp(-radius_sq / 0.04) * jnp.asarray(
-        [0.42, 0.10],
-        dtype=y.dtype,
-    )
-
-    cap_radius_sq = 1.0 - VISIBLE_DOT_MIN**2
-    soft_radius_sq = SOFT_CAP_RADIUS**2
-    edge_fraction = jnp.clip(
-        (cap_radius_sq - radius_sq) / (cap_radius_sq - soft_radius_sq),
-        0.0,
-        1.0,
-    )
-    boundary_pressure = jnp.maximum(radius_sq - soft_radius_sq, 0.0)
-    boundary_pressure = boundary_pressure / (cap_radius_sq - soft_radius_sq)
-
-    orbit = 1.15 * tangent_coords
-    radial = 0.85 * (TARGET_CAP_RADIUS**2 - radius_sq) * cap_coords
-    boundary = -3.5 * boundary_pressure**2 * cap_coords
-    drift_coords = orbit + radial + boundary + seed_coords
-
-    noise_scale = diffusion_scale * edge_fraction
-    drift = _ambient_from_cap_coords(drift_coords, e1, e2)
-    first_field = noise_scale * e1
-    second_field = noise_scale * e2
     spin_field = jnp.asarray([0.18 * diffusion_scale, 0.0, 0.0], dtype=y.dtype)
 
     def project_tangent(vector):
         return vector - jnp.dot(vector, point) * point
 
-    drift_frame = _tangent_to_so3_coords(y, project_tangent(drift))
+    drift_frame = _tangent_to_so3_coords(y, CAP_ATTRACTION * project_tangent(center))
     diffusion_rows = jnp.stack(
         [
-            _tangent_to_so3_coords(y, project_tangent(first_field)),
-            _tangent_to_so3_coords(y, project_tangent(second_field)),
+            _tangent_to_so3_coords(y, diffusion_scale * project_tangent(e1)),
+            _tangent_to_so3_coords(y, diffusion_scale * project_tangent(e2)),
             spin_field,
         ]
     )
@@ -287,9 +269,7 @@ def make_geometric_euler_solve(
             diffrax.LinearInterpolation(ts=fine_ts, ys=brownian),
         ),
     )
-    return _make_sphere_solve(
-        "Georax GeometricEuler", terms, GeometricEuler(), fine_ts, y0
-    )
+    return _make_sphere_solve("GeometricEuler", terms, GeometricEuler(), fine_ts, y0)
 
 
 def make_srkmk_reference_solve(
@@ -323,7 +303,7 @@ def make_srkmk_reference_solve(
     )
 
 
-def make_log_ode_solve(
+def make_rough_solve(
     fine_ts: jax.Array,
     brownian: jax.Array,
     coarse_ts: jax.Array,
@@ -331,10 +311,16 @@ def make_log_ode_solve(
     y0: jax.Array,
     diffusion_scale: float,
     depth: int,
+    solver: Davie | LogODE,
 ) -> Callable[[], SphereSolve]:
     driver_ys = jnp.concatenate([fine_ts[:, None], brownian], axis=1)
     driver = diffrax.LinearInterpolation(ts=fine_ts, ys=driver_ys)
-    control = SignatureInterpolation(
+    interpolation = (
+        SignatureInterpolation
+        if isinstance(solver, Davie)
+        else LogSignatureInterpolation
+    )
+    control = interpolation(
         driver,
         coarse_ts,
         depth=depth,
@@ -347,9 +333,11 @@ def make_log_ode_solve(
 
     term = RoughTerm(vector_field, control, SO(3))
     return _make_sphere_solve(
-        "Roughrax LogODE + RKMK(Heun)",
+        "Davie"
+        if isinstance(solver, Davie)
+        else f"LogODE + RKMK({type(solver.solver.solver).__name__})",
         term,
-        LogODE(RKMK(diffrax.Heun())),
+        solver,
         coarse_ts,
         y0,
     )
@@ -365,26 +353,13 @@ def time_solve(solve_fn) -> tuple[SphereSolve, float]:
 
 
 def normalise_finish_times(
-    euler: SphereSolve,
-    euler_elapsed: float,
-    log_ode: SphereSolve,
-    log_ode_elapsed: float,
-) -> tuple[TimedSolve, TimedSolve]:
-    euler_elapsed = max(euler_elapsed, 1e-12)
-    log_ode_elapsed = max(log_ode_elapsed, 1e-12)
-    slowest = max(euler_elapsed, log_ode_elapsed, 1e-12)
-    return (
-        TimedSolve(
-            euler,
-            euler_elapsed,
-            TARGET_VIDEO_SECONDS * euler_elapsed / slowest,
-        ),
-        TimedSolve(
-            log_ode,
-            log_ode_elapsed,
-            TARGET_VIDEO_SECONDS * log_ode_elapsed / slowest,
-        ),
-    )
+    solves: list[tuple[SphereSolve, float]],
+) -> list[TimedSolve]:
+    slowest = max(elapsed for _, elapsed in solves)
+    return [
+        TimedSolve(solve, elapsed, TARGET_VIDEO_SECONDS * max(elapsed, 1e-12) / slowest)
+        for solve, elapsed in solves
+    ]
 
 
 def validate_rotation_solve(solve: SphereSolve) -> None:
@@ -433,27 +408,12 @@ def configure_axis(ax) -> None:
         alpha=0.22,
         linewidth=0.55,
     )
-    ax.set_xlim(-1.1, 1.1)
-    ax.set_ylim(-1.1, 1.1)
-    ax.set_zlim(-1.1, 1.1)
+    ax.set_xlim(-1.02, 1.02)
+    ax.set_ylim(-1.02, 1.02)
+    ax.set_zlim(-1.02, 1.02)
     ax.set_box_aspect((1.0, 1.0, 1.0))
     ax.view_init(elev=VIEW_ELEV, azim=VIEW_AZIM)
     ax.set_axis_off()
-
-
-def piecewise_linear_path_at(solve: SphereSolve, t: float) -> np.ndarray:
-    if t <= solve.ts[0] or len(solve.ts) == 1:
-        return solve.points[:1]
-    if t >= solve.ts[-1]:
-        return solve.points
-
-    index = int(np.searchsorted(solve.ts, t, side="right") - 1)
-    index = int(np.clip(index, 0, len(solve.ts) - 2))
-    fraction = (t - solve.ts[index]) / (solve.ts[index + 1] - solve.ts[index])
-    current = (1.0 - fraction) * solve.points[index] + fraction * solve.points[
-        index + 1
-    ]
-    return np.concatenate([solve.points[: index + 1], current[None, :]], axis=0)
 
 
 def final_point_error(solve: SphereSolve, reference: SphereSolve) -> float:
@@ -461,69 +421,144 @@ def final_point_error(solve: SphereSolve, reference: SphereSolve) -> float:
 
 
 def make_animation(
-    euler: TimedSolve,
-    log_ode: TimedSolve,
+    solves: list[TimedSolve],
     reference: SphereSolve,
     *,
     video_seconds: float,
     end_pause_seconds: float,
     fps: int,
-):
+    seed: int,
+    depth: int,
+) -> tuple[plt.Figure, animation.FuncAnimation]:
     total_seconds = video_seconds + end_pause_seconds
     if total_seconds <= 0.0:
         raise ValueError("Total animation duration must be positive.")
     frames = max(2, int(round(total_seconds * fps)))
     frame_seconds = np.linspace(0.0, total_seconds, frames)
-    fig = plt.figure(figsize=(10.5, 5.4), constrained_layout=True)
-    axes = [fig.add_subplot(1, 2, i + 1, projection="3d") for i in range(2)]
-    solves = [euler, log_ode]
-    colors = ["#2667ff", "#d64045"]
+    fig = plt.figure(figsize=(13.5, 6.4), facecolor=BACKGROUND)
+    fig.text(
+        0.5,
+        0.955,
+        "One Brownian path on the sphere",
+        ha="center",
+        fontsize=22,
+        weight="bold",
+        color=INK,
+    )
+    fig.text(
+        0.5,
+        0.905,
+        "Geometric Euler · LogODE · Manifold Davie",
+        ha="center",
+        fontsize=12,
+        color=MUTED,
+    )
+    colors = ["#5479ab", "#bd7160", "#008779"]
     artists = []
 
-    for ax, timed, color in zip(axes, solves, colors, strict=True):
+    for i, (timed, color) in enumerate(zip(solves, colors, strict=True)):
         solve = timed.solve
-        title = (
-            f"{solve.name}\n"
-            f"{len(solve.ts) - 1} steps, timed {timed.elapsed_seconds:.3f}s, "
-            f"finishes at {timed.finish_seconds:.1f}s"
+        center = (i + 0.5) / len(solves)
+        ax = fig.add_axes(
+            [i / len(solves), 0.225, 1 / len(solves), 0.61],
+            projection="3d",
+            facecolor=BACKGROUND,
         )
         configure_axis(ax)
-        ax.text2D(
-            0.5,
-            PANEL_TITLE_Y,
-            title,
-            transform=ax.transAxes,
+        fig.text(
+            center,
+            0.825,
+            solve.name,
             ha="center",
-            va="bottom",
+            fontsize=13,
+            weight="bold",
+            color=INK,
+        )
+        fig.text(
+            center,
+            0.788,
+            f"{len(solve.ts) - 1} steps · {timed.elapsed_seconds * 1000:.1f} ms",
+            ha="center",
             fontsize=11,
-            color="#111111",
+            color=MUTED,
         )
-        (path_line,) = ax.plot([], [], [], color=color, alpha=0.9, linewidth=1.6)
-        ax.text2D(
-            0.5,
-            ERROR_LABEL_Y,
-            f"final point error vs {reference.name}\n"
-            f"{final_point_error(solve, reference):.3e}",
-            transform=ax.transAxes,
+        (path_line,) = ax.plot([], [], [], color=color, alpha=0.95, linewidth=2.2)
+        (head,) = ax.plot(
+            [],
+            [],
+            [],
+            "o",
+            color=color,
+            markersize=6,
+            markeredgecolor="white",
+            markeredgewidth=1,
+        )
+        ax.plot(*solve.points[0], "o", color=INK, markersize=4)
+        clock = fig.text(center, 0.235, "", ha="center", fontsize=12, color=INK)
+        fig.text(
+            center,
+            0.195,
+            f"Playback finishes at {timed.finish_seconds:.1f} s",
             ha="center",
-            va="top",
-            fontsize=9,
-            color="#26332f",
+            fontsize=10,
+            color=MUTED,
         )
-        artists.append(path_line)
+        fig.text(
+            center,
+            0.145,
+            f"Final point error  {final_point_error(solve, reference):.3e}",
+            ha="center",
+            fontsize=11,
+            color=INK,
+        )
 
-    fig.suptitle("One Brownian path on S^2, solved two ways", fontsize=13)
+        # Display-only geodesic interpolation: preserve every solver knot and keep
+        # the moving head on the sphere. This work is outside the solve timing.
+        interpolate = Slerp(solve.ts, Rotation.from_matrix(solve.rotations))
+        display_ts = np.unique(
+            np.concatenate([solve.ts, np.linspace(solve.ts[0], solve.ts[-1], 2049)])
+        )
+        display_points = sphere_points(interpolate(display_ts).as_matrix())
+        artists.append(
+            (path_line, head, clock, interpolate, display_ts, display_points)
+        )
+
+    fig.text(
+        0.5,
+        0.09,
+        f"Depth {depth} · Seed {seed} · Reference: {reference.name}, {len(reference.ts) - 1} steps",
+        ha="center",
+        fontsize=10,
+        color=MUTED,
+    )
+    fig.text(
+        0.5,
+        0.045,
+        "Playback scaled by warmed solve time · Signature construction and plotting excluded",
+        ha="center",
+        fontsize=10,
+        color=MUTED,
+    )
 
     def update(frame: int):
         display_second = frame_seconds[frame]
         changed = []
-        for timed, path_line in zip(solves, artists, strict=True):
+        for timed, (line, head, clock, interpolate, ts, points) in zip(
+            solves, artists, strict=True
+        ):
             solve = timed.solve
             progress = min(display_second / timed.finish_seconds, 1.0)
             t = solve.ts[0] + progress * (solve.ts[-1] - solve.ts[0])
-            path = piecewise_linear_path_at(solve, t)
-            path_line.set_data_3d(path[:, 0], path[:, 1], path[:, 2])
-            changed.append(path_line)
+            current = interpolate(float(t)).as_matrix()[:, 2]
+            index = np.searchsorted(ts, t, side="left")
+            path = np.concatenate([points[:index], current[None, :]])
+            line.set_data_3d(path[:, 0], path[:, 1], path[:, 2])
+            head.set_data_3d(*current[:, None])
+            clock.set_text(
+                f"t = {t:.2f} / {solve.ts[-1]:.2f}"
+                + (" · complete" if progress == 1 else "")
+            )
+            changed.extend([line, head, clock])
         return changed
 
     anim = animation.FuncAnimation(
@@ -607,42 +642,44 @@ def main() -> None:
         y0=y0,
         diffusion_scale=args.diffusion_scale,
     )
-    solve_log_ode = make_log_ode_solve(
-        fine_ts,
-        brownian,
-        coarse_ts,
-        y0=y0,
-        diffusion_scale=args.diffusion_scale,
-        depth=args.depth,
+    rough_solves = [
+        make_rough_solve(
+            fine_ts,
+            brownian,
+            coarse_ts,
+            y0=y0,
+            diffusion_scale=args.diffusion_scale,
+            depth=args.depth,
+            solver=solver,
+        )
+        for solver in (LogODE(RKMK(diffrax.Heun())), Davie())
+    ]
+    timed_solves = normalise_finish_times(
+        [time_solve(solve) for solve in [solve_euler, *rough_solves]]
     )
-    euler, euler_elapsed = time_solve(solve_euler)
-    log_ode, log_ode_elapsed = time_solve(solve_log_ode)
     reference = solve_reference()
-    validate_rotation_solve(euler)
-    validate_rotation_solve(log_ode)
-    validate_rotation_solve(reference)
-    validate_visible_sector([euler, log_ode, reference])
-    timed_euler, timed_log_ode = normalise_finish_times(
-        euler,
-        euler_elapsed,
-        log_ode,
-        log_ode_elapsed,
-    )
-    print(
-        "timed solves: "
-        f"GeometricEuler {timed_euler.elapsed_seconds:.3f}s "
-        f"(finishes at {timed_euler.finish_seconds:.1f}s), "
-        f"LogODE {timed_log_ode.elapsed_seconds:.3f}s "
-        f"(finishes at {timed_log_ode.finish_seconds:.1f}s)"
-    )
+    solutions = [timed.solve for timed in timed_solves] + [reference]
+    for solve in solutions:
+        validate_rotation_solve(solve)
+    validate_visible_sector(solutions)
+    for timed in timed_solves:
+        print(
+            f"{timed.solve.name}: {len(timed.solve.ts) - 1} steps, "
+            f"warmed solve {timed.elapsed_seconds:.6f}s "
+            f"(playback finishes at {timed.finish_seconds:.1f}s), "
+            f"final point error vs {reference.name} "
+            f"{final_point_error(timed.solve, reference):.3e}",
+            flush=True,
+        )
 
     fig, anim = make_animation(
-        timed_euler,
-        timed_log_ode,
+        timed_solves,
         reference,
         video_seconds=TARGET_VIDEO_SECONDS,
         end_pause_seconds=END_PAUSE_SECONDS,
         fps=args.fps,
+        seed=args.seed,
+        depth=args.depth,
     )
     for format_name in [item.strip() for item in args.formats.split(",") if item]:
         output = args.output_stem.with_suffix(f".{format_name}")

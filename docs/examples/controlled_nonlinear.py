@@ -43,7 +43,7 @@ import jax.numpy as jnp
 import matplotlib
 import numpy as np
 
-from roughrax import ControlledVectorField, LogODE, RoughTerm, SignatureInterpolation
+from roughrax import ControlledVectorField, LogODE, RoughTerm, LogSignatureInterpolation
 
 matplotlib.use("Agg")
 import matplotlib.animation as animation
@@ -63,7 +63,7 @@ def vector_field(x, y, args):
 @eqx.filter_jit
 def solve_log_ode(ts, xs, knots, *, depth, controlled):
     driver = diffrax.LinearInterpolation(ts=ts, ys=xs)
-    control = SignatureInterpolation(
+    control = LogSignatureInterpolation(
         driver, signature_knots=knots, depth=depth, solution="stratonovich"
     )
     if controlled:
