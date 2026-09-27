@@ -46,7 +46,7 @@ dependencies = [
     "georax>=0.1.0",
     "jaxtyping>=0.3.0",
     "numpy>=2.0",
-    "pysiglib>=3.1.0",
+    "pysiglib>=4.0.0rc2",
     "torch>=2.12.0",
 ]
 
@@ -56,10 +56,16 @@ Repository = "https://github.com/luke-a-thompson/roughrax"
 Issues = "https://github.com/luke-a-thompson/roughrax/issues"
 
 [tool.uv.sources]
+# Upstream MKW factorial fix, pending release: pySigLib PR #72.
+pysiglib = { git = "https://github.com/daniil-shmelev/pySigLib.git", rev = "6d663452c7958cd10bdc69baded49f464d177b92" }
 georax = { git = "https://github.com/luke-a-thompson/georax.git" }
 torch = [
     { index = "pytorch-cpu" },
 ]
+
+[tool.uv.extra-build-dependencies]
+# PySigLib's native FFI headers must match the runtime JAX version.
+pysiglib = [{ requirement = "jaxlib", match-runtime = true }]
 
 [[tool.uv.index]]
 name = "pytorch-cpu"
