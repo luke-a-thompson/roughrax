@@ -74,6 +74,39 @@ def test_signature_intervals_may_not_cross_knots():
         control.evaluate(0.0, 2.0)
 
 
+@pytest.mark.parametrize(
+    "times",
+    [
+        (-0.1,),
+        (2.1,),
+        (-0.1, 0.5),
+        (0.5, -0.1),
+        (1.5, 2.1),
+        (2.1, 1.5),
+        (-0.1, -0.1),
+        (2.1, 2.1),
+    ],
+)
+def test_log_signature_interpolation_rejects_out_of_range_times(times):
+    control = LogSignatureInterpolation.from_logsignatures(
+        jnp.array([0.0, 1.0, 2.0]), jnp.array([[1.0], [2.0]]), 1, 1
+    )
+    with pytest.raises(eqx.EquinoxRuntimeError, match="signature knot range"):
+        control.evaluate(*times)
+
+
+def test_log_signature_interpolation_accepts_boundary_times():
+    control = LogSignatureInterpolation.from_logsignatures(
+        jnp.array([0.0, 1.0, 2.0]), jnp.array([[1.0], [2.0]]), 1, 1
+    )
+    assert jnp.array_equal(control.evaluate(0.0), jnp.array([0.0]))
+    assert jnp.array_equal(control.evaluate(2.0), jnp.array([3.0]))
+    assert jnp.array_equal(control.evaluate(0.0, 1.0), jnp.array([1.0]))
+    assert jnp.array_equal(control.evaluate(2.0, 1.0), jnp.array([-2.0]))
+    for t in (0.0, 2.0):
+        assert jnp.array_equal(control.evaluate(t, t), jnp.array([0.0]))
+
+
 def test_ito_correction_is_forwarded_to_pysiglib():
     ts = jnp.linspace(0.0, 1.0, 5)
     ys = jnp.asarray([[0.0], [0.2], [-0.1], [0.4], [0.3]])

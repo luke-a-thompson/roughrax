@@ -208,8 +208,18 @@ class LogSignatureInterpolation(_SignatureInterpolation):
         del left
         if self.coeffs is None:
             raise ValueError("LogSignatureInterpolation must be materialised first.")
+        t0 = eqx.error_if(
+            jnp.asarray(t0),
+            ~((t0 >= self.ts[0]) & (t0 <= self.ts[-1])),
+            "LogSignatureInterpolation times must lie within the signature knot range.",
+        )
         if t1 is None:
             return self._evaluate(t0)
+        t1 = eqx.error_if(
+            jnp.asarray(t1),
+            ~((t1 >= self.ts[0]) & (t1 <= self.ts[-1])),
+            "LogSignatureInterpolation times must lie within the signature knot range.",
+        )
         lower, upper = jnp.minimum(t0, t1), jnp.maximum(t0, t1)
         index = jnp.clip(
             jnp.searchsorted(self.ts, lower, side="right") - 1,
