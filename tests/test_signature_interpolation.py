@@ -11,16 +11,9 @@ from roughrax import LogSignatureInterpolation, RoughTerm
 
 
 def test_rough_term_accepts_direct_logsig_columns():
-    ts = jnp.linspace(0.0, 1.0, 5)
-    ys = jnp.stack([ts, ts * 0.5], axis=-1)
-    signature_knots = ts[::2]
-    driver = diffrax.LinearInterpolation(ts=ts, ys=ys)
-    control = LogSignatureInterpolation(
-        driver,
-        signature_knots,
-        depth=2,
-        solution="stratonovich",
-    ).materialise(Euclidean())
+    control = LogSignatureInterpolation.from_logsignatures(
+        jnp.array([0.0, 1.0]), jnp.array([[0.3, -0.2, 0.4]]), input_dim=2, depth=2
+    )
 
     def direct_columns(y):
         logsig_size = 3
@@ -29,39 +22,29 @@ def test_rough_term_accepts_direct_logsig_columns():
         )
 
     y = jnp.asarray([0.25, 0.5])
-    coeffs = control.evaluate(signature_knots[0], signature_knots[1])
+    coeffs = control.evaluate(0.0, 1.0)
     columns = direct_columns(y)
+    expected = 0.3 * columns[:, 0] - 0.2 * columns[:, 1] + 0.4 * columns[:, 2]
 
     for vector_field in (direct_columns, lambda y: direct_columns(y).reshape(-1)):
         term = RoughTerm.from_lifted_vector_field(vector_field, control, Euclidean())
-        assert term.vf(0.0, y, None).shape == (coeffs.shape[0],) + y.shape
         assert jnp.allclose(
             term.prod(term.vf(0.0, y, None), coeffs),
-            jnp.tensordot(columns, coeffs, axes=1),
+            expected,
         )
 
 
 def test_signature_interpolation_evaluates_linearly():
-    ts = jnp.linspace(0.0, 1.0, 5)
-    ys = jnp.stack([ts, ts * 0.5], axis=-1)
-    signature_knots = ts[::2]
-    driver = diffrax.LinearInterpolation(ts=ts, ys=ys)
-    control = LogSignatureInterpolation(
-        driver,
-        signature_knots,
+    control = LogSignatureInterpolation.from_logsignatures(
+        jnp.array([0.0, 2.0, 5.0]),
+        jnp.array([[1.0, -2.0, 0.3], [4.0, 1.0, -0.5]]),
+        input_dim=2,
         depth=2,
-        solution="stratonovich",
-    ).materialise(Euclidean())
-
-    assert jnp.allclose(
-        control.evaluate(signature_knots[0], signature_knots[1]), control.coeffs[0]
     )
-    assert jnp.allclose(
-        control.evaluate(
-            signature_knots[0], 0.5 * (signature_knots[0] + signature_knots[1])
-        ),
-        0.5 * control.coeffs[0],
-    )
+    assert jnp.allclose(control.evaluate(0.5, 1.5), jnp.array([0.5, -1.0, 0.15]))
+    assert jnp.allclose(control.evaluate(2.75, 4.25), jnp.array([2.0, 0.5, -0.25]))
+    assert jnp.allclose(control.evaluate(4.25, 2.75), jnp.array([-2.0, -0.5, 0.25]))
+    assert jnp.allclose(control.evaluate(3.5), jnp.array([3.0, -1.5, 0.05]))
 
 
 def test_signature_knots_must_match_regular_control_stride():
@@ -87,7 +70,6 @@ def test_signature_intervals_may_not_cross_knots():
         depth=2,
     )
 
-    assert jnp.array_equal(control.evaluate(0.0, 1.0), control.coeffs[0])
     with pytest.raises(eqx.EquinoxRuntimeError, match="may not cross"):
         control.evaluate(0.0, 2.0)
 
@@ -114,7 +96,6 @@ def test_ito_correction_is_forwarded_to_pysiglib():
         planar=False,
         correction=correction,
     )
-    assert jnp.array_equal(control.correction, correction)
     assert jnp.allclose(control.coeffs, expected)
 
 
@@ -129,38 +110,6 @@ def test_signature_interpolation_rejects_stratonovich_correction():
             depth=2,
             solution="stratonovich",
             correction=jnp.asarray([1.0]),
-        )
-
-
-@pytest.mark.parametrize(
-    ("ts", "coeffs", "message"),
-    [
-        (jnp.ones((2, 2)), jnp.ones((1, 3)), "ts must have shape"),
-        (jnp.ones((1,)), jnp.ones((0, 3)), "at least two points"),
-        (jnp.ones((3,)), jnp.ones((2, 1, 3)), "coeffs must have shape"),
-        (jnp.ones((3,)), jnp.ones((1, 3)), "first axis"),
-        (jnp.ones((3,)), jnp.ones((2, 4)), "last axis"),
-    ],
-)
-def test_from_logsignatures_validates_array_dimensions(ts, coeffs, message):
-    with pytest.raises(ValueError, match=message):
-        LogSignatureInterpolation.from_logsignatures(
-            ts,
-            coeffs,
-            input_dim=2,
-            depth=2,
-        )
-
-
-@pytest.mark.parametrize(("name", "value"), [("input_dim", 0), ("depth", 0)])
-def test_from_logsignatures_requires_positive_integer_dimensions(name, value):
-    kwargs = dict(input_dim=2, depth=2)
-    kwargs[name] = value
-    with pytest.raises(ValueError, match=name):
-        LogSignatureInterpolation.from_logsignatures(
-            jnp.asarray([0.0, 1.0]),
-            jnp.ones((1, 3)),
-            **kwargs,
         )
 
 

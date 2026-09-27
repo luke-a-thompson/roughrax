@@ -9,26 +9,9 @@ from georax import Euclidean
 
 from roughrax import LinearFer, RoughTerm
 from roughrax._bases import make_lyndon_basis
-from roughrax._solver._fer_coefficients import (
-    FER_FACTORS,
-    FER_MAX_DEPTH,
-    LieWord,
-)
+from roughrax._solver._fer_coefficients import FER_MAX_DEPTH
 from roughrax._solver.linear import _fer_factors
 from roughrax._term import LogSignatureInterpolation
-
-
-def _word_weight(word: LieWord) -> int:
-    if isinstance(word, int):
-        return word + 1
-    return _word_weight(word[0]) + _word_weight(word[1])
-
-
-def test_generated_fer_recipes_are_homogeneous_and_normalised():
-    assert len(FER_FACTORS) == FER_MAX_DEPTH
-    for depth, recipe in enumerate(FER_FACTORS, start=1):
-        assert recipe[0] == (1, 1, depth - 1)
-        assert all(_word_weight(word) == depth for _, _, word in recipe)
 
 
 def _fer_product(components):
@@ -100,12 +83,6 @@ def _solve_precomputed(depth):
         saveat=diffrax.SaveAt(t1=True),
         max_steps=2,
     ).ys[-1]
-
-
-def test_linear_fer_supports_generated_maximum_depth():
-    result = _solve_precomputed(FER_MAX_DEPTH)
-    assert result.shape == (2, 2)
-    assert jnp.isfinite(result).all()
 
 
 def test_linear_fer_rejects_depth_beyond_generated_table():

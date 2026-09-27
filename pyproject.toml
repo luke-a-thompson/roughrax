@@ -78,7 +78,6 @@ dev = [
     "fbm>=0.3.0",
     "matplotlib>=3.10.8",
     "tqdm",
-    "pytest-benchmark>=5.2.3",
 ]
 
 [tool.uv.build-backend]

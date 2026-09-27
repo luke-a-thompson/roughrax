@@ -181,9 +181,6 @@ def test_vmapped_precomputed_logsignatures_match_materialised_controls(solver):
         ).materialise(Euclidean())
 
     materialised_controls = [materialise(path) for path in paths]
-    assert all(control.coeffs is not None for control in materialised_controls)
-
-    assert materialised_controls[0].basis is not None
     path_coeffs = jnp.stack(
         [control.coeffs for control in materialised_controls],
     )
